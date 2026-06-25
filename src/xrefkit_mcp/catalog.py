@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import io
 import re
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +22,10 @@ from .repository import (
     stable_hash,
 )
 from .schemas import (
+    ClientToolDistribution,
+    ClientToolFile,
+    ClientToolManifestEntry,
+    ClientToolPipPackage,
     ClosureContract,
     KnowledgeCatalogEntry,
     SkillCatalogEntry,
@@ -33,6 +40,9 @@ from .schemas import (
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_+#.-]+")
+IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([A-Za-z0-9_.]+)", re.MULTILINE)
+CLIENT_TOOL_PACKAGE_ID = "xrefkit-client-python-tools"
+CLIENT_TOOL_PACKAGE_VERSION = "0.1.0"
 STARTUP_REFERENCE_DEFINITIONS = [
     (
         "agent/000_agent_entry.md",
@@ -220,6 +230,58 @@ class XRefCatalog:
     def list_workflows(self) -> list[dict]:
         return [workflow.to_dict() for workflow in _build_workflows(self.repo_root)]
 
+    def get_client_tool_manifest(self) -> dict:
+        return _client_tool_distribution(self.repo_root).to_dict()
+
+    def get_client_tool_file(self, path: str) -> dict:
+        normalized = path.replace("\\", "/")
+        for tool_file in _client_tool_files(self.repo_root):
+            if tool_file.path == normalized:
+                return tool_file.to_dict()
+        raise KeyError(f"client tool file not found: {path}")
+
+    def get_client_tool_bundle(self) -> dict:
+        return {
+            "distribution": _client_tool_distribution(self.repo_root).to_dict(),
+            "files": [file.to_dict() for file in _client_tool_files(self.repo_root)],
+        }
+
+    def get_client_tool_pip_package(self) -> dict:
+        return _client_tool_pip_package(self.repo_root).to_dict()
+
+    def check_client_tool_versions(self, installed: dict[str, str] | None = None) -> dict:
+        installed = installed or {}
+        expected = {
+            CLIENT_TOOL_PACKAGE_ID: CLIENT_TOOL_PACKAGE_VERSION,
+            "xrefkit-client-tools": CLIENT_TOOL_PACKAGE_VERSION,
+        }
+        results: list[dict[str, str | bool]] = []
+        overall_ok = True
+        for package_id, version in expected.items():
+            actual = installed.get(package_id)
+            ok = actual == version
+            if not ok:
+                overall_ok = False
+            status = "ok" if ok else "missing" if actual is None else "mismatch"
+            results.append(
+                {
+                    "package_id": package_id,
+                    "expected_version": version,
+                    "installed_version": actual or "",
+                    "status": status,
+                    "ok": ok,
+                }
+            )
+        return {
+            "ok": overall_ok,
+            "expected": expected,
+            "results": results,
+            "instructions": [
+                "Client should call this during initialization with installed package versions.",
+                "If ok is false, install the package returned by get_client_tool_pip_package before executing client-side tools.",
+            ],
+        }
+
     def get_document_by_xid(self, xid: str) -> dict:
         for path in _managed_markdown_files(self.repo_root):
             text = read_text(path)
@@ -274,6 +336,7 @@ class XRefCatalog:
             references=references,
             workflows=_build_workflows(self.repo_root),
             runtime_role_contract=_runtime_role_contract(),
+            client_tool_distribution=_client_tool_distribution(self.repo_root),
             missing=missing,
         ).to_dict()
 
@@ -439,6 +502,181 @@ def _build_workflows(root: Path) -> list[WorkflowCatalogEntry]:
             )
         )
     return entries
+
+
+def _client_tool_distribution(root: Path) -> ClientToolDistribution:
+    return ClientToolDistribution(
+        package_id=CLIENT_TOOL_PACKAGE_ID,
+        version=CLIENT_TOOL_PACKAGE_VERSION,
+        execution_location="client",
+        server_executes_tools=False,
+        install_layout="write each file to the same relative path under the client-side target repository root",
+        files=[
+            ClientToolManifestEntry(
+                path=file.path,
+                kind=file.kind,
+                content_hash=file.content_hash,
+                size_bytes=file.size_bytes,
+                run_hint=file.run_hint,
+                resolver_tool="get_client_tool_file",
+                resolver_argument="path",
+            )
+            for file in _client_tool_files(root)
+        ],
+        instructions=[
+            "The MCP server only distributes these files; it must not execute them.",
+            "Install files at their returned relative paths, typically under tools/ in the client-side repository.",
+            "Run Python tools on the client side with the client repository root as the working directory.",
+            "Some tools expect sibling tools modules, so preserve the returned directory layout.",
+            "Some tools call external programs such as git, dotnet, npm, or project-specific commands; satisfy those prerequisites on the client side before execution.",
+        ],
+    )
+
+
+def _client_tool_files(root: Path) -> list[ClientToolFile]:
+    tools_root = root / "tools"
+    if not tools_root.exists():
+        return []
+    paths = sorted(tools_root.glob("**/*.py"))
+    support_paths = [
+        path
+        for path in sorted((tools_root / "profiles").glob("**/*"))
+        if path.is_file()
+    ]
+    readme = tools_root / "README.md"
+    if readme.exists():
+        support_paths.append(readme)
+
+    result: list[ClientToolFile] = []
+    for path in [*paths, *support_paths]:
+        rel = relative_to_repo(path, root)
+        text = read_text(path)
+        kind = _client_tool_kind(path)
+        result.append(
+            ClientToolFile(
+                path=rel,
+                kind=kind,
+                content=text,
+                content_hash=stable_hash(text),
+                size_bytes=len(text.encode("utf-8")),
+                run_hint=f"python {rel}" if kind == "python" else None,
+                imports=_python_imports(text) if kind == "python" else [],
+                links=markdown_xid_link_targets(text),
+            )
+        )
+    return result
+
+
+def _client_tool_pip_package(root: Path) -> ClientToolPipPackage:
+    files = _client_tool_files(root)
+    package_root = f"xrefkit-client-tools-{CLIENT_TOOL_PACKAGE_VERSION}"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            f"{package_root}/pyproject.toml",
+            _client_tools_pyproject(files),
+        )
+        archive.writestr(
+            f"{package_root}/README.md",
+            _client_tools_readme(),
+        )
+        archive.writestr(
+            f"{package_root}/tools/__init__.py",
+            '"""Client-side XRefKit deterministic tools."""\n',
+        )
+        for file in files:
+            archive.writestr(f"{package_root}/{file.path}", file.content)
+    content = buffer.getvalue()
+    encoded = base64.b64encode(content).decode("ascii")
+    return ClientToolPipPackage(
+        filename=f"xrefkit-client-tools-{CLIENT_TOOL_PACKAGE_VERSION}.zip",
+        package_id="xrefkit-client-tools",
+        version=CLIENT_TOOL_PACKAGE_VERSION,
+        package_format="zip-sdist",
+        install_command=f"python -m pip install xrefkit-client-tools-{CLIENT_TOOL_PACKAGE_VERSION}.zip",
+        content_base64=encoded,
+        content_hash=hashlib_sha256_bytes(content),
+        size_bytes=len(content),
+        warnings=[
+            "This package installs a top-level tools package to preserve existing XRefKit imports such as tools.error_policy_locator.",
+            "Install in a project virtual environment to avoid conflicts with any unrelated package named tools.",
+            "The package contains Python tools only; C# tools/structure_graph is not bundled.",
+            "The MCP server only distributes the package; tool execution is client-side.",
+        ],
+    )
+
+
+def _client_tools_pyproject(files: list[ClientToolFile]) -> str:
+    scripts: list[str] = []
+    for file in files:
+        if file.kind != "python" or "def main" not in file.content:
+            continue
+        module = file.path.removesuffix(".py").replace("/", ".")
+        script_name = "xrefkit-" + Path(file.path).stem.replace("_", "-")
+        scripts.append(f'{script_name} = "{module}:main"')
+    scripts_block = "\n".join(sorted(scripts))
+    return f"""[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xrefkit-client-tools"
+version = "{CLIENT_TOOL_PACKAGE_VERSION}"
+description = "Client-side deterministic Python tools distributed from XRefKit MCP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["tools*"]
+
+[project.scripts]
+{scripts_block}
+"""
+
+
+def _client_tools_readme() -> str:
+    return """# XRefKit Client Tools
+
+This package is generated by XRefKit MCP and installs the Python files from
+`tools/` for client-side execution.
+
+The MCP server does not execute these tools. Run them in the client-side target
+repository where the analyzed source files exist.
+
+Examples:
+
+```powershell
+python -m tools.cs_scope_probe --target .
+xrefkit-cs-scope-probe --target .
+```
+
+Some tools require external programs such as git, dotnet, npm, or precomputed
+`tools/structure_graph` output.
+"""
+
+
+def hashlib_sha256_bytes(content: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(content).hexdigest()
+
+
+def _client_tool_kind(path: Path) -> str:
+    if path.suffix == ".py":
+        return "python"
+    if path.name.lower() == "readme.md":
+        return "documentation"
+    return "support"
+
+
+def _python_imports(text: str) -> list[str]:
+    imports: list[str] = []
+    for match in IMPORT_RE.finditer(text):
+        module = match.group(1)
+        if module not in imports:
+            imports.append(module)
+    return imports
 
 
 def _runtime_role_contract() -> RuntimeRoleContract:

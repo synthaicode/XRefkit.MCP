@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import base64
+import io
+import zipfile
 from pathlib import Path
 
 from xrefkit_mcp.catalog import XRefCatalog
@@ -97,6 +100,27 @@ steps:
       Go: COMPLETE
       _invalid_or_absent: ABORT
 """,
+        )
+        write(
+            self.repo / "tools" / "sample_tool.py",
+            """from __future__ import annotations
+
+import argparse
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ok", action="store_true")
+    return 0 if parser.parse_args().ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+""",
+        )
+        write(
+            self.repo / "tools" / "profiles" / "sample.editorconfig",
+            "root = true\n",
         )
 
     def tearDown(self) -> None:
@@ -202,6 +226,60 @@ steps:
 
         self.assertEqual(document["path"], "docs/016_uncertainty_protocol.md")
         self.assertIn("# Uncertainty Protocol", document["content"])
+
+    def test_distributes_client_side_python_tools_without_server_execution(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+
+        manifest = catalog.get_client_tool_manifest()
+        file_paths = [file["path"] for file in manifest["files"]]
+        tool_file = catalog.get_client_tool_file("tools/sample_tool.py")
+        bundle = catalog.get_client_tool_bundle()
+
+        self.assertEqual(manifest["execution_location"], "client")
+        self.assertEqual(manifest["version"], "0.1.0")
+        self.assertIs(manifest["server_executes_tools"], False)
+        self.assertIn("tools/sample_tool.py", file_paths)
+        self.assertIn("tools/profiles/sample.editorconfig", file_paths)
+        self.assertEqual(tool_file["kind"], "python")
+        self.assertIn("argparse", tool_file["imports"])
+        self.assertIn("argparse.ArgumentParser", tool_file["content"])
+        self.assertGreaterEqual(len(bundle["files"]), 2)
+
+    def test_builds_pip_installable_client_tool_package(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+
+        package = catalog.get_client_tool_pip_package()
+        data = base64.b64decode(package["content_base64"])
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = set(archive.namelist())
+            pyproject = archive.read(
+                "xrefkit-client-tools-0.1.0/pyproject.toml"
+            ).decode("utf-8")
+
+        self.assertEqual(package["package_format"], "zip-sdist")
+        self.assertEqual(package["version"], "0.1.0")
+        self.assertIn("python -m pip install", package["install_command"])
+        self.assertIn("xrefkit-client-tools-0.1.0/tools/sample_tool.py", names)
+        self.assertIn("xrefkit-client-tools-0.1.0/tools/__init__.py", names)
+        self.assertIn("xrefkit-sample-tool", pyproject)
+
+    def test_checks_client_tool_versions(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+
+        ok = catalog.check_client_tool_versions(
+            {
+                "xrefkit-client-python-tools": "0.1.0",
+                "xrefkit-client-tools": "0.1.0",
+            }
+        )
+        mismatch = catalog.check_client_tool_versions(
+            {"xrefkit-client-python-tools": "0.0.1"}
+        )
+
+        self.assertIs(ok["ok"], True)
+        self.assertIs(mismatch["ok"], False)
+        self.assertTrue(any(row["status"] == "mismatch" for row in mismatch["results"]))
+        self.assertTrue(any(row["status"] == "missing" for row in mismatch["results"]))
 
 
 if __name__ == "__main__":

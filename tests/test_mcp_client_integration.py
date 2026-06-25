@@ -79,6 +79,49 @@ class McpClientIntegrationTests(unittest.TestCase):
                     self.assertEqual(skill_doc["xid"], skill_link_xid)
                     self.assertGreater(len(skill_doc["content"]), 1000)
 
+                    manifest_result = await session.call_tool(
+                        "get_client_tool_manifest", {}
+                    )
+                    manifest = manifest_result.structuredContent
+                    self.assertEqual(manifest["execution_location"], "client")
+                    self.assertEqual(manifest["version"], "0.1.0")
+                    self.assertIs(manifest["server_executes_tools"], False)
+                    self.assertTrue(
+                        any(
+                            file["path"] == "tools/cs_scope_probe.py"
+                            for file in manifest["files"]
+                        )
+                    )
+
+                    tool_file_result = await session.call_tool(
+                        "get_client_tool_file",
+                        {"path": "tools/cs_scope_probe.py"},
+                    )
+                    tool_file = tool_file_result.structuredContent
+                    self.assertEqual(tool_file["kind"], "python")
+                    self.assertIn("argparse", tool_file["imports"])
+                    self.assertIn("def main", tool_file["content"])
+
+                    package_result = await session.call_tool(
+                        "get_client_tool_pip_package", {}
+                    )
+                    package = package_result.structuredContent
+                    self.assertEqual(package["package_format"], "zip-sdist")
+                    self.assertEqual(package["version"], "0.1.0")
+                    self.assertIn("python -m pip install", package["install_command"])
+                    self.assertGreater(len(package["content_base64"]), 1000)
+
+                    version_result = await session.call_tool(
+                        "check_client_tool_versions",
+                        {
+                            "installed": {
+                                "xrefkit-client-python-tools": "0.1.0",
+                                "xrefkit-client-tools": "0.1.0",
+                            }
+                        },
+                    )
+                    self.assertIs(version_result.structuredContent["ok"], True)
+
         anyio.run(scenario)
 
 

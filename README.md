@@ -8,6 +8,7 @@ The server sends inactive definitions only:
 - workflow catalog entries from `flows/**/*.yaml`
 - knowledge catalog entries from `knowledge/**/*.md`
 - Skill metadata and `SKILL.md` content from `skills/**`
+- distributable Python tool files from `tools/**/*.py` for client-side execution
 - read-only tool contracts for catalog, expansion, and routing tools
 
 It does not execute Skills, mutate repositories, approve knowledge updates, or
@@ -130,6 +131,59 @@ The response includes:
 Resolve `meta_links[]` and `skill_links[]` the same way: call
 `get_document_by_xid` with the link `xid`.
 
+## Client-Side Python Tools
+
+Python code under XRefKit `tools/` is distributed for client-side execution. The
+server never runs these tools.
+
+Startup includes `client_tool_distribution`, a manifest with file paths, hashes,
+run hints, package version, and resolver information. During client
+initialization, call `check_client_tool_versions` with the installed package
+versions and install/update the client tools when the check fails.
+
+Example version check:
+
+```json
+{
+  "installed": {
+    "xrefkit-client-python-tools": "0.1.0",
+    "xrefkit-client-tools": "0.1.0"
+  }
+}
+```
+
+To install the tools on a client that does not have the XRefKit checkout:
+
+1. Call `get_client_tool_manifest` to inspect available files.
+2. Call `get_client_tool_bundle` to fetch all distributable files, or
+   `get_client_tool_file({"path": "tools/cs_scope_probe.py"})` for one file.
+3. Write each returned file to the same relative path under the client-side
+   target repository root.
+4. Run tools on the client side, for example `python tools/cs_scope_probe.py`.
+
+Alternatively, fetch a pip-installable source package with
+`get_client_tool_pip_package`. The response contains `filename`,
+`install_command`, `content_base64`, `content_hash`, and `warnings`. Write
+`content_base64` to `filename`, then install it:
+
+```powershell
+python -m pip install xrefkit-client-tools-0.1.0.zip
+```
+
+The package preserves the top-level `tools` package because some scripts import
+siblings such as `tools.error_policy_locator`. Install it in a project virtual
+environment to avoid conflicts with unrelated packages named `tools`.
+
+The distribution currently includes:
+
+- `tools/**/*.py`
+- support files under `tools/profiles/`
+- `tools/README.md`
+
+The C# `tools/structure_graph/` project is not bundled by the Python tool
+distribution. Python tools that consume `structure_graph` output still expect
+that output to be produced separately on the client side.
+
 ## Useful CLI Checks
 
 ```powershell
@@ -137,6 +191,11 @@ xrefkit-mcp-catalog startup-context --repo C:\dev\itsm\XRefKit
 xrefkit-mcp-catalog list-workflows --repo C:\dev\itsm\XRefKit
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121
 xrefkit-mcp-catalog get-skill --repo C:\dev\itsm\XRefKit --skill-id csharp_review
+xrefkit-mcp-catalog client-tool-manifest --repo C:\dev\itsm\XRefKit
+xrefkit-mcp-catalog get-client-tool-file --repo C:\dev\itsm\XRefKit --path tools/cs_scope_probe.py
+xrefkit-mcp-catalog client-tool-bundle --repo C:\dev\itsm\XRefKit
+xrefkit-mcp-catalog client-tool-pip-package --repo C:\dev\itsm\XRefKit
+xrefkit-mcp-catalog check-client-tool-versions --repo C:\dev\itsm\XRefKit --installed xrefkit-client-python-tools=0.1.0 --installed xrefkit-client-tools=0.1.0
 xrefkit-mcp-catalog rank-skills --repo C:\dev\itsm\XRefKit --purpose "review C# code for non-Roslyn risks"
 ```
 
@@ -179,4 +238,3 @@ Do not expose `0.0.0.0:8000` directly to an untrusted network.
 This package intentionally keeps the server plane read-only. Tool contracts
 declare `execution_location` and `side_effects`; server-side tools are rejected
 at definition time unless `side_effects` is `none`.
-

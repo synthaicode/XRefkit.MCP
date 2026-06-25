@@ -54,6 +54,28 @@ def main(argv: list[str] | None = None) -> int:
     contracts = sub.add_parser("tool-contracts", help="list read-only tool contracts")
     contracts.add_argument("--repo", required=True)
 
+    tool_manifest = sub.add_parser("client-tool-manifest", help="list distributable client-side tool files")
+    tool_manifest.add_argument("--repo", required=True)
+
+    tool_file = sub.add_parser("get-client-tool-file", help="get one distributable client-side tool file")
+    tool_file.add_argument("--repo", required=True)
+    tool_file.add_argument("--path", required=True)
+
+    tool_bundle = sub.add_parser("client-tool-bundle", help="get all distributable client-side tool files")
+    tool_bundle.add_argument("--repo", required=True)
+
+    tool_package = sub.add_parser("client-tool-pip-package", help="get a pip-installable client tool package")
+    tool_package.add_argument("--repo", required=True)
+
+    version_check = sub.add_parser("check-client-tool-versions", help="check installed client tool versions")
+    version_check.add_argument("--repo", required=True)
+    version_check.add_argument(
+        "--installed",
+        action="append",
+        default=[],
+        help="Installed package version as package_id=version. Can be repeated.",
+    )
+
     args = parser.parse_args(argv)
     model = XRefCatalog.build(Path(args.repo))
 
@@ -84,6 +106,17 @@ def main(argv: list[str] | None = None) -> int:
         payload = model.rank_skills_for_purpose(args.purpose, args.limit)
     elif args.command == "tool-contracts":
         payload = model.list_tool_contracts()
+    elif args.command == "client-tool-manifest":
+        payload = model.get_client_tool_manifest()
+    elif args.command == "get-client-tool-file":
+        payload = model.get_client_tool_file(args.path)
+    elif args.command == "client-tool-bundle":
+        payload = model.get_client_tool_bundle()
+    elif args.command == "client-tool-pip-package":
+        payload = model.get_client_tool_pip_package()
+    elif args.command == "check-client-tool-versions":
+        installed = dict(item.split("=", 1) for item in args.installed)
+        payload = model.check_client_tool_versions(installed)
     else:
         parser.error(f"unknown command: {args.command}")
 

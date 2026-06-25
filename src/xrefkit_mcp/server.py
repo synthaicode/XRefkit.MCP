@@ -93,6 +93,26 @@ def main(argv: list[str] | None = None) -> int:
     def list_tool_contracts() -> list[dict[str, Any]]:
         return catalog.list_tool_contracts()
 
+    @app.tool()
+    def get_client_tool_manifest() -> dict[str, Any]:
+        return catalog.get_client_tool_manifest()
+
+    @app.tool()
+    def get_client_tool_file(path: str) -> dict[str, Any]:
+        return catalog.get_client_tool_file(path)
+
+    @app.tool()
+    def get_client_tool_bundle() -> dict[str, Any]:
+        return catalog.get_client_tool_bundle()
+
+    @app.tool()
+    def get_client_tool_pip_package() -> dict[str, Any]:
+        return catalog.get_client_tool_pip_package()
+
+    @app.tool()
+    def check_client_tool_versions(installed: dict[str, str] | None = None) -> dict[str, Any]:
+        return catalog.check_client_tool_versions(installed)
+
     app.run(transport=args.transport)
     return 0
 

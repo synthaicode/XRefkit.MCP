@@ -174,6 +174,73 @@ class RuntimeRoleContract:
 
 
 @dataclass(frozen=True)
+class ClientToolFile:
+    path: str
+    kind: Literal["python", "support", "documentation"]
+    content: str
+    content_hash: str
+    size_bytes: int
+    run_hint: str | None
+    imports: list[str] = field(default_factory=list)
+    links: list[dict[str, str]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ClientToolManifestEntry:
+    path: str
+    kind: Literal["python", "support", "documentation"]
+    content_hash: str
+    size_bytes: int
+    run_hint: str | None
+    resolver_tool: str
+    resolver_argument: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ClientToolDistribution:
+    package_id: str
+    version: str
+    execution_location: Literal["client"]
+    server_executes_tools: bool
+    install_layout: str
+    files: list[ClientToolManifestEntry]
+    instructions: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "package_id": self.package_id,
+            "version": self.version,
+            "execution_location": self.execution_location,
+            "server_executes_tools": self.server_executes_tools,
+            "install_layout": self.install_layout,
+            "files": [file.to_dict() for file in self.files],
+            "instructions": self.instructions,
+        }
+
+
+@dataclass(frozen=True)
+class ClientToolPipPackage:
+    filename: str
+    package_id: str
+    version: str
+    package_format: Literal["zip-sdist"]
+    install_command: str
+    content_base64: str
+    content_hash: str
+    size_bytes: int
+    warnings: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class StartupContext:
     catalog_version: str
     client_instructions: list[str]
@@ -182,6 +249,7 @@ class StartupContext:
     references: list[StartupReference]
     workflows: list[WorkflowCatalogEntry]
     runtime_role_contract: RuntimeRoleContract
+    client_tool_distribution: ClientToolDistribution
     missing: list[dict[str, str]]
 
     def to_dict(self) -> dict[str, Any]:
@@ -193,5 +261,6 @@ class StartupContext:
             "references": [reference.to_dict() for reference in self.references],
             "workflows": [workflow.to_dict() for workflow in self.workflows],
             "runtime_role_contract": self.runtime_role_contract.to_dict(),
+            "client_tool_distribution": self.client_tool_distribution.to_dict(),
             "missing": self.missing,
         }
