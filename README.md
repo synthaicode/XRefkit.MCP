@@ -1,8 +1,60 @@
 # XRefKit MCP
 
-Read-only MCP projection layer for XRefKit repositories.
+![Traditional MCP executes on the server; XRefKit MCP distributes protocol, knowledge, and contracts for client-side execution.](docs/assets/xrefkit-mcp-comparison.png)
 
-The server sends inactive definitions only:
+Traditional MCP transports execution. XRefKit MCP transports operational context.
+Execution, side effects, and closure remain entirely on the client.
+
+XRefKit MCP lets multiple humans and AI agents work against the same repository
+governance rules, startup protocol, workflow order, Skill procedures, and
+closure expectations over MCP.
+
+It is a portability layer for XRefKit's operating model: a remote client can
+load the rules it must follow without having the XRefKit repository checked out
+locally.
+
+## What It Solves
+
+AI-assisted repository work often breaks down when every agent starts with a
+different prompt, partial local memory, or a different interpretation of "done".
+XRefKit MCP exposes the shared operational context that makes collaborative work
+consistent:
+
+- what must be read at startup
+- which workflow applies
+- which Skill procedure should be used
+- which knowledge fragments are authoritative
+- which tool contracts are available
+- what must be true before closure
+
+## What It Is Not
+
+XRefKit MCP is not:
+
+- a RAG server
+- a Skill execution server
+- an automation agent that mutates repositories
+- a generic Git operation service
+- an approval/apply service for canonical knowledge changes
+
+The server sends inactive definitions and distributable client-side assets. Work,
+tool execution, side effects, approval, and closure decisions stay on the client
+side or with the responsible human.
+
+## What It Distributes
+
+The MCP server publishes:
+
+- Knowledge: XID-addressed Markdown content and link resolution
+- Workflow Protocol: workflow catalog and deterministic flow metadata
+- Tool Contract: read-only MCP tool contracts plus client-side tool manifests
+- Closure Contract: executor/checker/quality/handoff roles and closure rules
+- Startup Protocol: base-control Markdown, load order, uncertainty policy, and
+  context-direction guard
+- Skill Content: `meta.md` and `SKILL.md` bodies with resolvable XID links
+- Client Tools: versioned Python tools as files or a pip-installable package
+
+The server sends read-only definitions and packages only:
 
 - startup/base-control Markdown content
 - workflow catalog entries from `flows/**/*.yaml`
