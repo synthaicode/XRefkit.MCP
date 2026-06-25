@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xrefkit-mcp"
+version = "0.1.0"
+description = "Read-only MCP catalog layer for XRefKit repositories"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "synthaicode" }]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0.0"]
+test = ["pytest>=8.0.0"]
+
+[project.scripts]
+xrefkit-mcp-catalog = "xrefkit_mcp.cli:main"
+xrefkit-mcp-server = "xrefkit_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
