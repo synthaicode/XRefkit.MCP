@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xrefkit-mcp"
-version = "0.1.0"
+version = "0.1.2"
 description = "Read-only MCP catalog layer for XRefKit repositories"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,4 +26,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-

@@ -33,6 +33,11 @@ class McpClientIntegrationTests(unittest.TestCase):
                         startup["link_resolution"]["resolver_tool"],
                         "get_document_by_xid",
                     )
+                    self.assertEqual(startup["access_policy"]["mode"], "mcp_only")
+                    self.assertEqual(
+                        startup["access_policy"]["required_tools"]["xid_link_resolution"],
+                        "get_document_by_xid",
+                    )
                     self.assertTrue(
                         any(
                             "get_document_by_xid" in instruction

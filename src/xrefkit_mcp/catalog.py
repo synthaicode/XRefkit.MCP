@@ -318,8 +318,37 @@ class XRefCatalog:
             )
         return StartupContext(
             catalog_version=self.catalog_version,
+            access_policy={
+                "mode": "mcp_only",
+                "source_of_truth": "xrefkit_mcp",
+                "applies_to": [
+                    "startup references",
+                    "XID-linked Markdown documents",
+                    "Skill meta and procedure content",
+                    "workflow definitions",
+                    "knowledge catalog entries",
+                    "tool contracts",
+                    "closure contracts",
+                    "unknown protocol",
+                ],
+                "forbidden_client_shortcuts": [
+                    "Do not read XRefKit governance Markdown directly from the client filesystem when this MCP server is configured.",
+                    "Do not resolve transferred Markdown links by filesystem path.",
+                    "Do not open local Skill files to bypass get_skill.",
+                    "Do not treat a local checkout as authoritative unless the user explicitly disables MCP-only mode.",
+                ],
+                "required_tools": {
+                    "startup": "get_startup_context",
+                    "xid_link_resolution": "get_document_by_xid",
+                    "skill_content": "get_skill",
+                    "workflow_catalog": "list_workflows",
+                    "client_tool_distribution": "get_client_tool_manifest",
+                },
+            },
             client_instructions=[
                 "Read and apply references in load_order before routing task-specific work.",
+                "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
+                "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
                 "Do not assume referenced Markdown files exist on the client filesystem.",
                 "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
                 "Use the returned document content as the authoritative text for that XID.",

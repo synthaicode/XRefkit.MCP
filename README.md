@@ -91,6 +91,10 @@ The client URL is:
 http://<server-host>:8000/mcp
 ```
 
+Opening `/mcp` directly in a browser returns endpoint metadata only. MCP clients
+must use Streamable HTTP requests with `Accept: application/json,
+text/event-stream`; successful startup logs include `ListToolsRequest`.
+
 For local-only testing, bind to loopback:
 
 ```powershell
@@ -138,6 +142,7 @@ The client should call `get_startup_context` first.
 
 That response contains:
 
+- `access_policy`
 - `client_instructions`
 - `link_resolution`
 - base-control Markdown references, including full `content`
@@ -147,6 +152,21 @@ That response contains:
 The client must not assume the XRefKit repository exists on the client machine.
 Use the transferred Markdown content and resolve any needed XID links through
 MCP.
+
+The startup response sets `access_policy.mode` to `mcp_only`. In this mode, the
+client must treat XRefKit MCP as the source of truth for governance content:
+
+- do not read XRefKit governance Markdown directly from the client filesystem
+- do not resolve transferred Markdown links by filesystem path
+- do not open local Skill files to bypass `get_skill`
+- resolve XID links with `get_document_by_xid`
+
+This is a client-side operating rule. If an AI client is also granted filesystem
+access to the XRefKit repository, the server cannot technically prevent that
+client from reading files. To enforce MCP-only access in VS Code or similar
+clients, open a workspace that does not contain the XRefKit repository, or
+disable/restrict filesystem tools for that repository, then connect to the MCP
+server over `streamable-http`.
 
 Link resolution rule:
 

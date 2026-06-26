@@ -191,8 +191,17 @@ if __name__ == "__main__":
         xids = [reference["xid"] for reference in context["references"]]
 
         self.assertEqual(context["link_resolution"]["resolver_tool"], "get_document_by_xid")
+        self.assertEqual(context["access_policy"]["mode"], "mcp_only")
+        self.assertEqual(context["access_policy"]["source_of_truth"], "xrefkit_mcp")
+        self.assertIn(
+            "get_startup_context",
+            context["access_policy"]["required_tools"]["startup"],
+        )
         self.assertTrue(
             any("get_document_by_xid" in item for item in context["client_instructions"])
+        )
+        self.assertTrue(
+            any("MCP-only mode is active" in item for item in context["client_instructions"])
         )
         self.assertIn("UNCERTAINTY", xids)
         self.assertIn("AGENTENTRY", xids)

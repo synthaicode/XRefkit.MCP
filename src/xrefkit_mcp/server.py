@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import sys
 from pathlib import Path
 from typing import Any
 
 from .catalog import XRefCatalog
+
+SERVER_VERSION = "0.1.2"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -23,6 +27,12 @@ def main(argv: list[str] | None = None) -> int:
         default="/mcp",
         help="Path for streamable-http transport",
     )
+    parser.add_argument(
+        "--log-level",
+        default="info",
+        choices=["debug", "info", "warning", "error", "critical"],
+        help="HTTP server log level for network transports",
+    )
     args = parser.parse_args(argv)
     catalog = XRefCatalog.build(Path(args.repo))
 
@@ -39,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         host=args.host,
         port=args.port,
         streamable_http_path=args.http_path,
+        log_level=args.log_level.upper(),
     )
 
     @app.tool()
@@ -113,8 +124,96 @@ def main(argv: list[str] | None = None) -> int:
     def check_client_tool_versions(installed: dict[str, str] | None = None) -> dict[str, Any]:
         return catalog.check_client_tool_versions(installed)
 
-    app.run(transport=args.transport)
+    if args.transport == "streamable-http":
+        _run_streamable_http(app, args.host, args.port, args.http_path, args.log_level)
+    else:
+        app.run(transport=args.transport)
     return 0
+
+
+def _run_streamable_http(app: Any, host: str, port: int, http_path: str, log_level: str) -> None:
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    import anyio
+    import uvicorn
+
+    async def serve() -> None:
+        starlette_app = app.streamable_http_app()
+        _add_streamable_http_probe_middleware(starlette_app, http_path)
+        config = uvicorn.Config(
+            starlette_app,
+            host=host,
+            port=port,
+            log_level=log_level.lower(),
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    anyio.run(serve)
+
+
+def _add_streamable_http_probe_middleware(starlette_app: Any, http_path: str) -> None:
+    from starlette.responses import JSONResponse
+
+    class StreamableHttpProbeMiddleware:
+        def __init__(self, app: Any) -> None:
+            self.app = app
+
+        async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+            if scope.get("type") == "http":
+                method = scope.get("method", "")
+                path = scope.get("path", "")
+                headers = _decode_headers(scope.get("headers", []))
+                if _should_return_endpoint_info(method, path, headers, http_path):
+                    response = JSONResponse(_endpoint_info(http_path))
+                    await response(scope, receive, send)
+                    return
+            await self.app(scope, receive, send)
+
+    starlette_app.add_middleware(StreamableHttpProbeMiddleware)
+
+
+def _decode_headers(raw_headers: list[tuple[bytes, bytes]]) -> dict[str, str]:
+    return {
+        key.decode("latin-1").lower(): value.decode("latin-1")
+        for key, value in raw_headers
+    }
+
+
+def _should_return_endpoint_info(
+    method: str,
+    path: str,
+    headers: dict[str, str],
+    http_path: str,
+) -> bool:
+    if method.upper() != "GET":
+        return False
+    if _normalize_path(path) != _normalize_path(http_path):
+        return False
+
+    accept = headers.get("accept", "")
+    if "text/event-stream" in accept or "application/json" in accept:
+        return False
+    return True
+
+
+def _normalize_path(path: str) -> str:
+    normalized = "/" + path.strip("/")
+    return normalized if normalized != "/" else "/"
+
+
+def _endpoint_info(http_path: str) -> dict[str, Any]:
+    return {
+        "server": "xrefkit-mcp",
+        "version": SERVER_VERSION,
+        "transport": "streamable-http",
+        "endpoint": _normalize_path(http_path),
+        "message": (
+            "This is a Streamable HTTP MCP endpoint. MCP clients should use "
+            "POST and GET with Accept: application/json, text/event-stream."
+        ),
+    }
 
 
 if __name__ == "__main__":
