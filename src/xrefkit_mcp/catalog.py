@@ -19,6 +19,7 @@ from .repository import (
     parse_meta_bullets,
     read_text,
     relative_to_repo,
+    repository_fingerprint,
     scalar_list,
     stable_hash,
 )
@@ -102,6 +103,7 @@ STOP_TOKENS = {
 @dataclass(frozen=True)
 class XRefCatalog:
     repo_root: Path
+    repository_fingerprint: str
     catalog_version: str
     knowledge: list[KnowledgeCatalogEntry]
     skills: list[SkillCatalogEntry]
@@ -121,7 +123,22 @@ class XRefCatalog:
             + [tool.tool_id + tool.version for tool in tools]
         )
         catalog_version = stable_hash(version_basis)[:16]
-        return cls(root, catalog_version, knowledge, skills, tools)
+        return cls(
+            repo_root=root,
+            repository_fingerprint=repository_fingerprint(root),
+            catalog_version=catalog_version,
+            knowledge=knowledge,
+            skills=skills,
+            tools=tools,
+        )
+
+    def get_repository_identity(self) -> dict[str, str]:
+        return {
+            "repository_fingerprint": self.repository_fingerprint,
+            "fingerprint_algorithm": "sha256",
+            "fingerprint_basis": "resolved_repository_root",
+            "cache_namespace": self.repository_fingerprint,
+        }
 
     def list_knowledge_catalog(self, limit: int | None = None) -> list[dict]:
         return [entry.to_dict() for entry in self.knowledge[: limit or None]]
@@ -174,6 +191,7 @@ class XRefCatalog:
                 result["document_versions"] = _skill_document_versions(
                     entry,
                     self.repo_root,
+                    self.repository_fingerprint,
                 )
         return results
 
@@ -196,6 +214,7 @@ class XRefCatalog:
                 _conditional_document_response(
                     document,
                     known_document_versions.get(document.xid),
+                    self.repository_fingerprint,
                 )
             )
         result["meta_content"] = None
@@ -335,6 +354,7 @@ class XRefCatalog:
                 return _conditional_document_response(
                     _xref_document(path, self.repo_root, text),
                     known_version,
+                    self.repository_fingerprint,
                 )
         raise KeyError(f"document xid not found: {xid}")
 
@@ -356,7 +376,10 @@ class XRefCatalog:
                 missing.append({"path": rel_path, "reason": "startup reference has no XID"})
                 xid = f"path:{rel_path}"
             document = _xref_document(path, self.repo_root, text)
-            cache_policy = _document_cache_policy(document)
+            cache_policy = _document_cache_policy(
+                document,
+                self.repository_fingerprint,
+            )
             known_version = known_document_versions.get(xid)
             not_modified = (
                 known_version == document.content_hash
@@ -391,10 +414,12 @@ class XRefCatalog:
                         if not_modified
                         else cache_policy
                     ),
+                    repository_fingerprint=self.repository_fingerprint,
                 )
             )
         return StartupContext(
             catalog_version=self.catalog_version,
+            repository_identity=self.get_repository_identity(),
             access_policy={
                 "mode": "mcp_only",
                 "source_of_truth": "xrefkit_mcp",
@@ -415,6 +440,7 @@ class XRefCatalog:
                     "Do not treat a local checkout as authoritative unless the user explicitly disables MCP-only mode.",
                 ],
                 "required_tools": {
+                    "cache_identity": "get_repository_identity",
                     "startup": "get_startup_context",
                     "xid_link_resolution": "get_document_by_xid",
                     "skill_content": "get_skill",
@@ -423,6 +449,7 @@ class XRefCatalog:
                 },
             },
             client_instructions=[
+                "A client may call get_repository_identity as a content-free cache namespace preflight; get_startup_context remains the first governance-content load.",
                 "Read and apply references in load_order before routing task-specific work.",
                 "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
                 "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
@@ -523,8 +550,9 @@ def _xref_document(path: Path, root: Path, text: str) -> XRefDocument:
 def _conditional_document_response(
     document: XRefDocument,
     known_version: str | None,
+    repository_fingerprint: str,
 ) -> dict:
-    cache_policy = _document_cache_policy(document)
+    cache_policy = _document_cache_policy(document, repository_fingerprint)
     if (
         known_version == document.content_hash
         and cache_policy["cache_recommended"]
@@ -535,6 +563,7 @@ def _conditional_document_response(
             "path": document.path,
             "version": document.content_hash,
             "content_hash": document.content_hash,
+            "repository_fingerprint": repository_fingerprint,
             "cache_status": "not_modified",
             "content_omitted": True,
         }
@@ -543,6 +572,7 @@ def _conditional_document_response(
     result.update(
         {
             "version": document.content_hash,
+            "repository_fingerprint": repository_fingerprint,
             "cache_status": (
                 "bypassed"
                 if known_version == document.content_hash
@@ -557,8 +587,12 @@ def _conditional_document_response(
     return result
 
 
-def _document_cache_policy(document: XRefDocument) -> dict:
+def _document_cache_policy(
+    document: XRefDocument,
+    repository_fingerprint: str,
+) -> dict:
     full_document = document.to_dict()
+    full_document["repository_fingerprint"] = repository_fingerprint
     version_request = {
         "xid": document.xid,
         "known_version": document.content_hash,
@@ -569,6 +603,7 @@ def _document_cache_policy(document: XRefDocument) -> dict:
         "path": document.path,
         "version": document.content_hash,
         "content_hash": document.content_hash,
+        "repository_fingerprint": repository_fingerprint,
         "cache_status": "not_modified",
         "content_omitted": True,
     }
@@ -608,6 +643,7 @@ def _json_size(value: object) -> int:
 def _skill_document_versions(
     entry: SkillCatalogEntry,
     root: Path,
+    repository_fingerprint: str,
 ) -> list[dict]:
     versions: list[dict] = []
     for relative_path, text in [
@@ -621,7 +657,11 @@ def _skill_document_versions(
                 "path": document.path,
                 "version": document.content_hash,
                 "content_hash": document.content_hash,
-                "cache_policy": _document_cache_policy(document),
+                "repository_fingerprint": repository_fingerprint,
+                "cache_policy": _document_cache_policy(
+                    document,
+                    repository_fingerprint,
+                ),
             }
         )
     return versions

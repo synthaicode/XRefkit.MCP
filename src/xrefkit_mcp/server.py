@@ -73,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     @app.tool()
+    def get_repository_identity() -> dict[str, str]:
+        return catalog.get_repository_identity()
+
+    @app.tool()
     def get_startup_context(
         known_document_versions: dict[str, str] | None = None,
     ) -> dict[str, Any]:

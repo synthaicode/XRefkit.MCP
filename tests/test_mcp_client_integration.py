@@ -27,8 +27,26 @@ class McpClientIntegrationTests(unittest.TestCase):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
 
+                    identity_result = await session.call_tool(
+                        "get_repository_identity",
+                        {},
+                    )
+                    identity = identity_result.structuredContent
+                    self.assertEqual(
+                        len(identity["repository_fingerprint"]),
+                        32,
+                    )
+                    self.assertEqual(
+                        identity["cache_namespace"],
+                        identity["repository_fingerprint"],
+                    )
+
                     startup_result = await session.call_tool("get_startup_context", {})
                     startup = startup_result.structuredContent
+                    self.assertEqual(
+                        startup["repository_identity"]["repository_fingerprint"],
+                        identity["repository_fingerprint"],
+                    )
                     self.assertEqual(
                         startup["link_resolution"]["resolver_tool"],
                         "get_document_by_xid",
@@ -80,6 +98,10 @@ class McpClientIntegrationTests(unittest.TestCase):
                     )
                     startup_doc = startup_doc_result.structuredContent
                     self.assertEqual(startup_doc["xid"], startup_link_xid)
+                    self.assertEqual(
+                        startup_doc["repository_fingerprint"],
+                        identity["repository_fingerprint"],
+                    )
                     self.assertGreater(len(startup_doc["content"]), 1000)
                     cached_doc_result = await session.call_tool(
                         "get_document_by_xid",

@@ -19,6 +19,11 @@ def stable_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def repository_fingerprint(repo_root: Path) -> str:
+    normalized_root = repo_root.resolve().as_posix().casefold()
+    return stable_hash(f"resolved-repository-root:{normalized_root}")[:32]
+
+
 def first_xid(text: str) -> str | None:
     match = XID_RE.search(text)
     if not match:

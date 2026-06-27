@@ -124,6 +124,7 @@ class StartupReference:
     cache_status: Literal["miss", "modified", "not_modified", "bypassed"] = "miss"
     content_omitted: bool = False
     cache_policy: dict[str, Any] = field(default_factory=dict)
+    repository_fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -247,6 +248,7 @@ class ClientToolPipPackage:
 @dataclass(frozen=True)
 class StartupContext:
     catalog_version: str
+    repository_identity: dict[str, str]
     access_policy: dict[str, Any]
     client_instructions: list[str]
     link_resolution: dict[str, str]
@@ -260,6 +262,7 @@ class StartupContext:
     def to_dict(self) -> dict[str, Any]:
         return {
             "catalog_version": self.catalog_version,
+            "repository_identity": self.repository_identity,
             "access_policy": self.access_policy,
             "client_instructions": self.client_instructions,
             "link_resolution": self.link_resolution,

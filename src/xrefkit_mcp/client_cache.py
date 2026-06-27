@@ -11,6 +11,7 @@ from .repository import stable_hash
 
 
 XID_PATTERN = re.compile(r"^[A-Za-z0-9]+$")
+NAMESPACE_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class DocumentCacheProtocolError(RuntimeError):
@@ -18,8 +19,18 @@ class DocumentCacheProtocolError(RuntimeError):
 
 
 class XidDocumentCache:
-    def __init__(self, cache_dir: str | Path) -> None:
-        self.cache_dir = Path(cache_dir)
+    def __init__(
+        self,
+        cache_root: str | Path,
+        repository_fingerprint: str,
+    ) -> None:
+        if not NAMESPACE_PATTERN.fullmatch(repository_fingerprint):
+            raise ValueError(
+                f"invalid repository fingerprint: {repository_fingerprint!r}"
+            )
+        self.cache_root = Path(cache_root)
+        self.repository_fingerprint = repository_fingerprint
+        self.cache_dir = self.cache_root / repository_fingerprint
 
     def load(self, xid: str) -> dict[str, Any] | None:
         path = self._entry_path(xid)
@@ -27,8 +38,15 @@ class XidDocumentCache:
             payload = json.loads(path.read_text(encoding="utf-8"))
             document = payload["document"]
             version = payload["version"]
+            if payload["repository_fingerprint"] != self.repository_fingerprint:
+                raise ValueError("cached repository fingerprint does not match")
             if document["xid"] != xid:
                 raise ValueError("cached XID does not match the cache key")
+            if (
+                document["repository_fingerprint"]
+                != self.repository_fingerprint
+            ):
+                raise ValueError("document repository fingerprint does not match")
             if document["content_hash"] != version:
                 raise ValueError("cached version does not match content_hash")
             if stable_hash(document["content"]) != version:
@@ -66,6 +84,13 @@ class XidDocumentCache:
     def store(self, document: dict[str, Any]) -> bool:
         xid = str(document.get("xid", ""))
         self._validate_xid(xid)
+        if (
+            document.get("repository_fingerprint")
+            != self.repository_fingerprint
+        ):
+            raise DocumentCacheProtocolError(
+                "document repository fingerprint does not match cache namespace"
+            )
         policy = document.get("cache_policy") or {}
         if policy.get("cache_recommended") is not True:
             self.evict(xid)
@@ -85,6 +110,7 @@ class XidDocumentCache:
         target = self._entry_path(xid)
         payload = {
             "schema_version": 1,
+            "repository_fingerprint": self.repository_fingerprint,
             "xid": xid,
             "version": version,
             "document": document,
@@ -103,6 +129,8 @@ class XidDocumentCache:
             payload = json.loads(
                 self._startup_index_path().read_text(encoding="utf-8")
             )
+            if payload["repository_fingerprint"] != self.repository_fingerprint:
+                raise ValueError("startup repository fingerprint does not match")
             xids = payload["xids"]
             if not isinstance(xids, list) or not all(
                 isinstance(xid, str) for xid in xids
@@ -150,7 +178,11 @@ class XidDocumentCache:
             self._validate_xid(xid)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         serialized = json.dumps(
-            {"schema_version": 1, "xids": xids},
+            {
+                "schema_version": 1,
+                "repository_fingerprint": self.repository_fingerprint,
+                "xids": xids,
+            },
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
@@ -202,6 +234,13 @@ class XidDocumentCache:
     def materialize(self, response: dict[str, Any]) -> dict[str, Any]:
         xid = str(response.get("xid", ""))
         self._validate_xid(xid)
+        if (
+            response.get("repository_fingerprint")
+            != self.repository_fingerprint
+        ):
+            raise DocumentCacheProtocolError(
+                "response repository fingerprint does not match cache namespace"
+            )
         if response.get("cache_status") == "not_modified":
             cached = self.load(xid)
             if cached is None:

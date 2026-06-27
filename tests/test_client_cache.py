@@ -12,7 +12,15 @@ from xrefkit_mcp.client_cache import (
 from xrefkit_mcp.repository import stable_hash
 
 
-def cacheable_document(content: str, *, xid: str = "ABC123") -> dict:
+REPOSITORY_FINGERPRINT = "a" * 32
+
+
+def cacheable_document(
+    content: str,
+    *,
+    xid: str = "ABC123",
+    repository_fingerprint: str = REPOSITORY_FINGERPRINT,
+) -> dict:
     version = stable_hash(content)
     return {
         "xid": xid,
@@ -23,6 +31,7 @@ def cacheable_document(content: str, *, xid: str = "ABC123") -> dict:
         "links": [],
         "content_hash": version,
         "version": version,
+        "repository_fingerprint": repository_fingerprint,
         "cache_status": "miss",
         "content_omitted": False,
         "cache_policy": {"cache_recommended": True},
@@ -32,7 +41,10 @@ def cacheable_document(content: str, *, xid: str = "ABC123") -> dict:
 class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.cache = XidDocumentCache(self.temp_dir.name)
+        self.cache = XidDocumentCache(
+            self.temp_dir.name,
+            REPOSITORY_FINGERPRINT,
+        )
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -50,7 +62,12 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_corrupt_cache_entry_is_evicted_and_treated_as_miss(self) -> None:
-        cache_path = Path(self.temp_dir.name, "ABC123.json")
+        cache_path = Path(
+            self.temp_dir.name,
+            REPOSITORY_FINGERPRINT,
+            "ABC123.json",
+        )
+        cache_path.parent.mkdir(parents=True)
         cache_path.write_text("{not-json", encoding="utf-8")
 
         self.assertIsNone(self.cache.load("ABC123"))
@@ -70,6 +87,28 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.cache.store(document), False)
         self.assertIsNone(self.cache.load("ABC123"))
 
+    def test_repository_namespaces_isolate_the_same_xid(self) -> None:
+        other_fingerprint = "b" * 32
+        other_cache = XidDocumentCache(
+            self.temp_dir.name,
+            other_fingerprint,
+        )
+        first = cacheable_document("first repository")
+        second = cacheable_document(
+            "second repository",
+            repository_fingerprint=other_fingerprint,
+        )
+
+        self.cache.store(first)
+        other_cache.store(second)
+
+        self.assertEqual(self.cache.load("ABC123")["content"], "first repository")
+        self.assertEqual(
+            other_cache.load("ABC123")["content"],
+            "second repository",
+        )
+        self.assertNotEqual(self.cache.cache_dir, other_cache.cache_dir)
+
     async def test_resolve_uses_cached_body_after_not_modified_response(self) -> None:
         document = cacheable_document("current content")
         self.cache.store(document)
@@ -79,8 +118,11 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
             calls.append((xid, known_version))
             return {
                 "xid": xid,
+                "title": "Current server title",
+                "path": "docs/current-server-path.md",
                 "version": document["content_hash"],
                 "content_hash": document["content_hash"],
+                "repository_fingerprint": REPOSITORY_FINGERPRINT,
                 "cache_status": "not_modified",
                 "content_omitted": True,
                 "cache_policy": {"cache_recommended": True},
@@ -89,6 +131,8 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
         resolved = await self.cache.resolve("ABC123", fetch)
 
         self.assertEqual(resolved["content"], "current content")
+        self.assertEqual(resolved["title"], "Current server title")
+        self.assertEqual(resolved["path"], "docs/current-server-path.md")
         self.assertEqual(resolved["client_cache_status"], "hit")
         self.assertEqual(calls, [("ABC123", document["content_hash"])])
 
@@ -126,6 +170,7 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
                             "xid": document["xid"],
                             "version": document["content_hash"],
                             "content_hash": document["content_hash"],
+                            "repository_fingerprint": REPOSITORY_FINGERPRINT,
                             "cache_status": "not_modified",
                             "content_omitted": True,
                         }
@@ -163,6 +208,7 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
                     "xid": xid,
                     "version": document["content_hash"],
                     "content_hash": document["content_hash"],
+                    "repository_fingerprint": REPOSITORY_FINGERPRINT,
                     "cache_status": "not_modified",
                     "content_omitted": True,
                     "cache_policy": {"cache_recommended": True},
@@ -179,10 +225,18 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
         self.cache.store(document)
 
         payload = json.loads(
-            Path(self.temp_dir.name, "ABC123.json").read_text(encoding="utf-8")
+            Path(
+                self.temp_dir.name,
+                REPOSITORY_FINGERPRINT,
+                "ABC123.json",
+            ).read_text(encoding="utf-8")
         )
 
         self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(
+            payload["repository_fingerprint"],
+            REPOSITORY_FINGERPRINT,
+        )
         self.assertEqual(payload["version"], document["content_hash"])
 
 

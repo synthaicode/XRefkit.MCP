@@ -14,6 +14,12 @@ def main(argv: list[str] | None = None) -> int:
     catalog = sub.add_parser("catalog", help="build and print catalog summary")
     catalog.add_argument("--repo", required=True)
 
+    identity = sub.add_parser(
+        "repository-identity",
+        help="print the repository cache identity",
+    )
+    identity.add_argument("--repo", required=True)
+
     startup = sub.add_parser("startup-context", help="print required startup references")
     startup.add_argument("--repo", required=True)
 
@@ -88,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
             "skill_count": len(model.skills),
             "tool_contract_count": len(model.tools),
         }
+    elif args.command == "repository-identity":
+        payload = model.get_repository_identity()
     elif args.command == "startup-context":
         payload = model.get_startup_context()
     elif args.command == "search-knowledge":

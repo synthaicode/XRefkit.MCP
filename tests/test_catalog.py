@@ -10,9 +10,13 @@ from pathlib import Path
 from xrefkit_mcp.catalog import (
     CACHE_MAX_VERSION_PAYLOAD_RATIO,
     XRefCatalog,
+    _conditional_document_response,
     _document_cache_policy,
 )
 from xrefkit_mcp.schemas import ToolContract, XRefDocument
+
+
+REPOSITORY_FINGERPRINT = "a" * 32
 
 
 def write(path: Path, content: str) -> None:
@@ -146,6 +150,10 @@ if __name__ == "__main__":
         self.assertIn("Skill: sample_review", catalog.skills[0].skill_content)
         self.assertEqual(catalog.skills[0].skill_links[0]["xid"], "ABC123")
         self.assertEqual(catalog.skills[0].skill_links[0]["resolver_tool"], "get_document_by_xid")
+        self.assertEqual(
+            catalog.get_repository_identity()["cache_namespace"],
+            catalog.repository_fingerprint,
+        )
 
     def test_expands_knowledge_by_xid(self) -> None:
         catalog = XRefCatalog.build(self.repo)
@@ -326,10 +334,26 @@ if __name__ == "__main__":
             content_hash="0" * 64,
         )
 
-        policy = _document_cache_policy(document)
+        policy = _document_cache_policy(document, REPOSITORY_FINGERPRINT)
 
         self.assertEqual(policy["maximum_ratio"], CACHE_MAX_VERSION_PAYLOAD_RATIO)
         self.assertIs(policy["cache_recommended"], False)
+
+        first = _conditional_document_response(
+            document,
+            None,
+            REPOSITORY_FINGERPRINT,
+        )
+        conditional = _conditional_document_response(
+            document,
+            document.content_hash,
+            REPOSITORY_FINGERPRINT,
+        )
+
+        self.assertEqual(first["cache_status"], "miss")
+        self.assertIs(first["cache_policy"]["cache_recommended"], False)
+        self.assertEqual(conditional["cache_status"], "bypassed")
+        self.assertIn("content", conditional)
 
     def test_distributes_client_side_python_tools_without_server_execution(self) -> None:
         catalog = XRefCatalog.build(self.repo)

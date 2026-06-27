@@ -236,6 +236,9 @@ Every XID-managed Markdown document uses its SHA-256 `content_hash` as an opaque
 version token. Clients can keep validated document bodies locally and perform a
 conditional MCP request:
 
+The complete protocol and client boundary are documented in
+[XID Document Client Cache](docs/xid-document-cache.md).
+
 ```json
 {
   "xid": "8A666C1FD121",
@@ -265,12 +268,22 @@ The package includes `XidDocumentCache`, which stores one JSON entry per XID,
 validates content hashes, removes corrupt entries, writes updates atomically,
 and exposes `known_versions()` for startup negotiation:
 
+`get_repository_identity` is a content-free cache namespace preflight.
+`get_startup_context` remains the first governance-content load.
+
 ```python
 from pathlib import Path
 
 from xrefkit_mcp import XidDocumentCache
 
-cache = XidDocumentCache(Path.home() / ".cache" / "xrefkit-mcp")
+identity_result = await session.call_tool("get_repository_identity", {})
+repository_fingerprint = identity_result.structuredContent[
+    "repository_fingerprint"
+]
+cache = XidDocumentCache(
+    Path.home() / ".cache" / "xrefkit-mcp",
+    repository_fingerprint,
+)
 
 
 async def fetch_document(xid: str, known_version: str | None) -> dict:
@@ -305,11 +318,11 @@ Do not send every cached version to every tool. `resolve_startup()` persists the
 previous startup XID set and sends only those versions. For other calls, use
 `known_versions(xids)` with only the documents required by that operation.
 
-On the current XRefKit repository snapshot, 295 of 301 XID documents pass the
-per-document cost gate; six small documents bypass caching. The implemented
-conditional request/response exchanges total 138,048 bytes versus 1,574,514
-bytes for the equivalent full responses, or 8.77%. A cached startup request and
-response total 30,545 bytes versus 58,643 bytes on first load, a 47.91%
+On the current XRefKit repository snapshot, 294 of 301 XID documents pass the
+per-document cost gate; seven small documents bypass caching. The implemented
+conditional request/response exchanges total 155,183 bytes versus 1,592,578
+bytes for the equivalent full responses, or 9.74%. A cached startup request and
+response total 31,122 bytes versus 59,219 bytes on first load, a 47.45%
 reduction.
 
 To inspect a Skill when the client has no local Skill files, call `get_skill`.

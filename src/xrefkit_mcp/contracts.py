@@ -6,6 +6,17 @@ from .schemas import ToolContract
 def builtin_tool_contracts() -> list[ToolContract]:
     contracts = [
         ToolContract(
+            tool_id="xref.get_repository_identity",
+            provider="xrefkit-mcp",
+            version="1",
+            execution_location="server",
+            side_effects="none",
+            input_schema={},
+            output_schema={"identity": "repository_identity"},
+            requires_workspace=True,
+            required_when="A client must select an isolated cache namespace before loading cached XID documents.",
+        ),
+        ToolContract(
             tool_id="xref.get_startup_context",
             provider="xrefkit-mcp",
             version="2",
