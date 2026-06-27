@@ -117,9 +117,13 @@ class StartupReference:
     required_at_init: bool
     reason: str
     summary: str
-    content: str
+    content: str | None
     links: list[dict[str, str]]
     content_hash: str | None = None
+    version: str | None = None
+    cache_status: Literal["miss", "modified", "not_modified", "bypassed"] = "miss"
+    content_omitted: bool = False
+    cache_policy: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

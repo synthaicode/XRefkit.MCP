@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+import json
+import re
+import tempfile
+from collections.abc import Awaitable, Callable, Iterable
+from pathlib import Path
+from typing import Any
+
+from .repository import stable_hash
+
+
+XID_PATTERN = re.compile(r"^[A-Za-z0-9]+$")
+
+
+class DocumentCacheProtocolError(RuntimeError):
+    pass
+
+
+class XidDocumentCache:
+    def __init__(self, cache_dir: str | Path) -> None:
+        self.cache_dir = Path(cache_dir)
+
+    def load(self, xid: str) -> dict[str, Any] | None:
+        path = self._entry_path(xid)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            document = payload["document"]
+            version = payload["version"]
+            if document["xid"] != xid:
+                raise ValueError("cached XID does not match the cache key")
+            if document["content_hash"] != version:
+                raise ValueError("cached version does not match content_hash")
+            if stable_hash(document["content"]) != version:
+                raise ValueError("cached content hash is invalid")
+            return document
+        except FileNotFoundError:
+            return None
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            self.evict(xid)
+            return None
+
+    def known_versions(
+        self,
+        xids: Iterable[str] | None = None,
+    ) -> dict[str, str]:
+        if xids is not None:
+            versions: dict[str, str] = {}
+            for xid in xids:
+                document = self.load(xid)
+                if document is not None:
+                    versions[xid] = document["content_hash"]
+            return versions
+        if not self.cache_dir.exists():
+            return {}
+        versions: dict[str, str] = {}
+        for path in sorted(self.cache_dir.glob("*.json")):
+            xid = path.stem
+            if not XID_PATTERN.fullmatch(xid):
+                continue
+            document = self.load(xid)
+            if document is not None:
+                versions[xid] = document["content_hash"]
+        return versions
+
+    def store(self, document: dict[str, Any]) -> bool:
+        xid = str(document.get("xid", ""))
+        self._validate_xid(xid)
+        policy = document.get("cache_policy") or {}
+        if policy.get("cache_recommended") is not True:
+            self.evict(xid)
+            return False
+        content = document.get("content")
+        version = document.get("content_hash")
+        if not isinstance(content, str) or not isinstance(version, str):
+            raise DocumentCacheProtocolError(
+                "cacheable document must include content and content_hash"
+            )
+        if stable_hash(content) != version:
+            raise DocumentCacheProtocolError(
+                "document content does not match content_hash"
+            )
+
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        target = self._entry_path(xid)
+        payload = {
+            "schema_version": 1,
+            "xid": xid,
+            "version": version,
+            "document": document,
+        }
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        self._write_atomic(target, serialized)
+        return True
+
+    def startup_versions(self) -> dict[str, str]:
+        try:
+            payload = json.loads(
+                self._startup_index_path().read_text(encoding="utf-8")
+            )
+            xids = payload["xids"]
+            if not isinstance(xids, list) or not all(
+                isinstance(xid, str) for xid in xids
+            ):
+                raise ValueError("invalid startup XID index")
+        except (
+            FileNotFoundError,
+            OSError,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
+            return {}
+        return self.known_versions(xids)
+
+    async def resolve_startup(
+        self,
+        fetch_startup: Callable[
+            [dict[str, str]],
+            Awaitable[dict[str, Any]],
+        ],
+    ) -> dict[str, Any]:
+        response = await fetch_startup(self.startup_versions())
+        try:
+            references = [
+                self.materialize(reference)
+                for reference in response["references"]
+            ]
+        except (DocumentCacheProtocolError, KeyError, TypeError):
+            response = await fetch_startup({})
+            references = [
+                self.materialize(reference)
+                for reference in response["references"]
+            ]
+        result = dict(response)
+        result["references"] = references
+        self._store_startup_index(
+            [str(reference["xid"]) for reference in references]
+        )
+        return result
+
+    def _store_startup_index(self, xids: list[str]) -> None:
+        for xid in xids:
+            self._validate_xid(xid)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        serialized = json.dumps(
+            {"schema_version": 1, "xids": xids},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        self._write_atomic(self._startup_index_path(), serialized)
+
+    def _write_atomic(self, target: Path, serialized: str) -> None:
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.cache_dir,
+                prefix=f".{target.stem}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary.write(serialized)
+                temporary_path = Path(temporary.name)
+            temporary_path.replace(target)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+
+    def evict(self, xid: str) -> None:
+        path = self._entry_path(xid)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+    async def resolve(
+        self,
+        xid: str,
+        fetch_document: Callable[[str, str | None], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        cached = self.load(xid)
+        known_version = cached["content_hash"] if cached else None
+        response = await fetch_document(xid, known_version)
+
+        if response.get("cache_status") == "not_modified":
+            try:
+                return self.materialize(response)
+            except DocumentCacheProtocolError:
+                response = await fetch_document(xid, None)
+
+        return self.materialize(response)
+
+    def materialize(self, response: dict[str, Any]) -> dict[str, Any]:
+        xid = str(response.get("xid", ""))
+        self._validate_xid(xid)
+        if response.get("cache_status") == "not_modified":
+            cached = self.load(xid)
+            if cached is None:
+                raise DocumentCacheProtocolError(
+                    "document response omitted content without a usable cache entry"
+                )
+            result = dict(cached)
+            result.update(response)
+            result["content"] = cached["content"]
+            result["content_omitted"] = False
+            result["client_cache_status"] = "hit"
+            return result
+
+        if "content" not in response:
+            raise DocumentCacheProtocolError(
+                "document response omitted content without a usable cache entry"
+            )
+        stored = self.store(response)
+        result = dict(response)
+        result["client_cache_status"] = "refreshed" if stored else "bypassed"
+        return result
+
+    def _entry_path(self, xid: str) -> Path:
+        self._validate_xid(xid)
+        return self.cache_dir / f"{xid}.json"
+
+    def _startup_index_path(self) -> Path:
+        return self.cache_dir / "_startup.json"
+
+    @staticmethod
+    def _validate_xid(xid: str) -> None:
+        if not XID_PATTERN.fullmatch(xid):
+            raise ValueError(f"invalid XID for cache key: {xid!r}")

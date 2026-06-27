@@ -1,7 +1,13 @@
 """Read-only catalog projection for XRefKit repositories."""
 
 from .catalog import XRefCatalog
+from .client_cache import DocumentCacheProtocolError, XidDocumentCache
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
-__all__ = ["XRefCatalog", "__version__"]
+__all__ = [
+    "DocumentCacheProtocolError",
+    "XRefCatalog",
+    "XidDocumentCache",
+    "__version__",
+]

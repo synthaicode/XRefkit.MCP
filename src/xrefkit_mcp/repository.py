@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 
-XID_RE = re.compile(r"xid[:=-]([A-Za-z0-9]+)|#xid-([A-Za-z0-9]+)")
+XID_RE = re.compile(r"xid[:=-]\s*([A-Za-z0-9]+)|#xid-([A-Za-z0-9]+)")
 HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 MD_LINK_RE = re.compile(r"\]\((?P<target>[^)]+#xid-(?P<xid>[A-Za-z0-9]+))\)")
 

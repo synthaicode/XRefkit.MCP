@@ -55,6 +55,24 @@ class McpClientIntegrationTests(unittest.TestCase):
                         uncertainty["links"][0]["resolver_tool"],
                         "get_document_by_xid",
                     )
+                    cached_startup_result = await session.call_tool(
+                        "get_startup_context",
+                        {
+                            "known_document_versions": {
+                                ref["xid"]: ref["content_hash"]
+                                for ref in startup["references"]
+                            }
+                        },
+                    )
+                    cached_startup = cached_startup_result.structuredContent
+                    self.assertTrue(
+                        all(
+                            ref["cache_status"] == "not_modified"
+                            and ref["content_omitted"]
+                            and ref["content"] is None
+                            for ref in cached_startup["references"]
+                        )
+                    )
 
                     startup_link_xid = uncertainty["links"][0]["xid"]
                     startup_doc_result = await session.call_tool(
@@ -63,6 +81,17 @@ class McpClientIntegrationTests(unittest.TestCase):
                     startup_doc = startup_doc_result.structuredContent
                     self.assertEqual(startup_doc["xid"], startup_link_xid)
                     self.assertGreater(len(startup_doc["content"]), 1000)
+                    cached_doc_result = await session.call_tool(
+                        "get_document_by_xid",
+                        {
+                            "xid": startup_link_xid,
+                            "known_version": startup_doc["content_hash"],
+                        },
+                    )
+                    cached_doc = cached_doc_result.structuredContent
+                    self.assertEqual(cached_doc["cache_status"], "not_modified")
+                    self.assertIs(cached_doc["content_omitted"], True)
+                    self.assertNotIn("content", cached_doc)
 
                     skill_result = await session.call_tool(
                         "get_skill", {"skill_id": "csharp_review"}
@@ -74,6 +103,36 @@ class McpClientIntegrationTests(unittest.TestCase):
                     self.assertEqual(
                         skill["skill_links"][0]["resolver_tool"],
                         "get_document_by_xid",
+                    )
+                    cache_aware_skill_result = await session.call_tool(
+                        "get_skill",
+                        {
+                            "skill_id": "csharp_review",
+                            "known_document_versions": {},
+                        },
+                    )
+                    cache_aware_skill = cache_aware_skill_result.structuredContent
+                    self.assertIsNone(cache_aware_skill["meta_content"])
+                    self.assertIsNone(cache_aware_skill["skill_content"])
+                    self.assertEqual(len(cache_aware_skill["documents"]), 2)
+                    skill_versions = {
+                        document["xid"]: document["content_hash"]
+                        for document in cache_aware_skill["documents"]
+                    }
+                    cached_skill_result = await session.call_tool(
+                        "get_skill",
+                        {
+                            "skill_id": "csharp_review",
+                            "known_document_versions": skill_versions,
+                        },
+                    )
+                    cached_skill = cached_skill_result.structuredContent
+                    self.assertTrue(
+                        all(
+                            document["cache_status"] == "not_modified"
+                            and "content" not in document
+                            for document in cached_skill["documents"]
+                        )
                     )
 
                     skill_link_xid = skill["skill_links"][0]["xid"]

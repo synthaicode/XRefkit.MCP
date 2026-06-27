@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import re
 import zipfile
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9_+#.-]+")
 IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([A-Za-z0-9_.]+)", re.MULTILINE)
 CLIENT_TOOL_PACKAGE_ID = "xrefkit-client-python-tools"
 CLIENT_TOOL_PACKAGE_VERSION = "0.1.0"
+CACHE_MAX_VERSION_PAYLOAD_RATIO = 0.5
 STARTUP_REFERENCE_DEFINITIONS = [
     (
         "agent/000_agent_entry.md",
@@ -155,11 +157,51 @@ class XRefCatalog:
                 expanded.append(self.expand_knowledge(candidate.xid))
         return {"entries": expanded, "missing": missing}
 
-    def list_skills(self, limit: int | None = None) -> list[dict]:
-        return [entry.to_dict() for entry in self.skills[: limit or None]]
+    def list_skills(
+        self,
+        limit: int | None = None,
+        include_content: bool = True,
+    ) -> list[dict]:
+        results = [entry.to_dict() for entry in self.skills[: limit or None]]
+        if not include_content:
+            for entry, result in zip(
+                self.skills[: limit or None],
+                results,
+                strict=True,
+            ):
+                result["meta_content"] = None
+                result["skill_content"] = None
+                result["document_versions"] = _skill_document_versions(
+                    entry,
+                    self.repo_root,
+                )
+        return results
 
-    def get_skill(self, skill_id: str) -> dict:
-        return self._skill_by_id(skill_id).to_dict()
+    def get_skill(
+        self,
+        skill_id: str,
+        known_document_versions: dict[str, str] | None = None,
+    ) -> dict:
+        entry = self._skill_by_id(skill_id)
+        result = entry.to_dict()
+        if known_document_versions is None:
+            return result
+
+        documents: list[dict] = []
+        for relative_path in [entry.meta_path, entry.path]:
+            path = self.repo_root / relative_path
+            text = read_text(path)
+            document = _xref_document(path, self.repo_root, text)
+            documents.append(
+                _conditional_document_response(
+                    document,
+                    known_document_versions.get(document.xid),
+                )
+            )
+        result["meta_content"] = None
+        result["skill_content"] = None
+        result["documents"] = documents
+        return result
 
     def get_skill_requirements(self, skill_id: str) -> dict:
         entry = self._skill_by_id(skill_id)
@@ -282,14 +324,25 @@ class XRefCatalog:
             ],
         }
 
-    def get_document_by_xid(self, xid: str) -> dict:
+    def get_document_by_xid(
+        self,
+        xid: str,
+        known_version: str | None = None,
+    ) -> dict:
         for path in _managed_markdown_files(self.repo_root):
             text = read_text(path)
             if first_xid(text) == xid:
-                return _xref_document(path, self.repo_root, text).to_dict()
+                return _conditional_document_response(
+                    _xref_document(path, self.repo_root, text),
+                    known_version,
+                )
         raise KeyError(f"document xid not found: {xid}")
 
-    def get_startup_context(self) -> dict:
+    def get_startup_context(
+        self,
+        known_document_versions: dict[str, str] | None = None,
+    ) -> dict:
+        known_document_versions = known_document_versions or {}
         references: list[StartupReference] = []
         missing: list[dict[str, str]] = []
         for rel_path, layer, reason in STARTUP_REFERENCE_DEFINITIONS:
@@ -302,6 +355,22 @@ class XRefCatalog:
             if not xid:
                 missing.append({"path": rel_path, "reason": "startup reference has no XID"})
                 xid = f"path:{rel_path}"
+            document = _xref_document(path, self.repo_root, text)
+            cache_policy = _document_cache_policy(document)
+            known_version = known_document_versions.get(xid)
+            not_modified = (
+                known_version == document.content_hash
+                and cache_policy["cache_recommended"]
+            )
+            cache_status = (
+                "not_modified"
+                if not_modified
+                else "bypassed"
+                if known_version == document.content_hash
+                else "modified"
+                if known_version
+                else "miss"
+            )
             references.append(
                 StartupReference(
                     xid=xid,
@@ -311,9 +380,17 @@ class XRefCatalog:
                     required_at_init=True,
                     reason=reason,
                     summary=first_paragraph(text),
-                    content=text,
+                    content=None if not_modified else text,
                     links=markdown_xid_link_targets(text),
-                    content_hash=stable_hash(text),
+                    content_hash=document.content_hash,
+                    version=document.content_hash,
+                    cache_status=cache_status,
+                    content_omitted=not_modified,
+                    cache_policy=(
+                        {"cache_recommended": True}
+                        if not_modified
+                        else cache_policy
+                    ),
                 )
             )
         return StartupContext(
@@ -353,12 +430,16 @@ class XRefCatalog:
                 "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
                 "Use the returned document content as the authoritative text for that XID.",
                 "For Skill entries, use skill_content as the procedure body and resolve skill_links through get_document_by_xid when needed.",
+                "Keep client-side XID document cache entries only when cache_policy.cache_recommended is true.",
+                "Send cached content_hash values as known_version or known_document_versions; when cache_status is not_modified, use the locally hash-validated body instead of downloading it again.",
             ],
             link_resolution={
                 "link_field": "links",
                 "xid_field": "xid",
                 "resolver_tool": "get_document_by_xid",
                 "resolver_argument": "xid",
+                "version_field": "content_hash",
+                "conditional_argument": "known_version",
                 "example_call": "get_document_by_xid({\"xid\": \"8A666C1FD121\"})",
             },
             load_order=[reference.xid for reference in references],
@@ -437,6 +518,113 @@ def _xref_document(path: Path, root: Path, text: str) -> XRefDocument:
         links=markdown_xid_link_targets(text),
         content_hash=stable_hash(text),
     )
+
+
+def _conditional_document_response(
+    document: XRefDocument,
+    known_version: str | None,
+) -> dict:
+    cache_policy = _document_cache_policy(document)
+    if (
+        known_version == document.content_hash
+        and cache_policy["cache_recommended"]
+    ):
+        return {
+            "xid": document.xid,
+            "title": document.title,
+            "path": document.path,
+            "version": document.content_hash,
+            "content_hash": document.content_hash,
+            "cache_status": "not_modified",
+            "content_omitted": True,
+        }
+
+    result = document.to_dict()
+    result.update(
+        {
+            "version": document.content_hash,
+            "cache_status": (
+                "bypassed"
+                if known_version == document.content_hash
+                else "modified"
+                if known_version
+                else "miss"
+            ),
+            "content_omitted": False,
+            "cache_policy": cache_policy,
+        }
+    )
+    return result
+
+
+def _document_cache_policy(document: XRefDocument) -> dict:
+    full_document = document.to_dict()
+    version_request = {
+        "xid": document.xid,
+        "known_version": document.content_hash,
+    }
+    not_modified_response = {
+        "xid": document.xid,
+        "title": document.title,
+        "path": document.path,
+        "version": document.content_hash,
+        "content_hash": document.content_hash,
+        "cache_status": "not_modified",
+        "content_omitted": True,
+    }
+    version_payload_bytes = _json_size(version_request) + _json_size(
+        not_modified_response
+    )
+    document_payload_bytes = _json_size(full_document)
+    ratio = (
+        version_payload_bytes / document_payload_bytes
+        if document_payload_bytes
+        else 1.0
+    )
+    return {
+        "cache_recommended": (
+            not document.xid.startswith("path:")
+            and ratio < CACHE_MAX_VERSION_PAYLOAD_RATIO
+        ),
+        "version_payload_bytes": version_payload_bytes,
+        "document_payload_bytes": document_payload_bytes,
+        "version_to_document_ratio": round(ratio, 6),
+        "maximum_ratio": CACHE_MAX_VERSION_PAYLOAD_RATIO,
+        "measurement_scope": "application_json_without_mcp_envelope",
+    }
+
+
+def _json_size(value: object) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+
+
+def _skill_document_versions(
+    entry: SkillCatalogEntry,
+    root: Path,
+) -> list[dict]:
+    versions: list[dict] = []
+    for relative_path, text in [
+        (entry.meta_path, entry.meta_content),
+        (entry.path, entry.skill_content),
+    ]:
+        document = _xref_document(root / relative_path, root, text)
+        versions.append(
+            {
+                "xid": document.xid,
+                "path": document.path,
+                "version": document.content_hash,
+                "content_hash": document.content_hash,
+                "cache_policy": _document_cache_policy(document),
+            }
+        )
+    return versions
 
 
 def _build_skills(root: Path) -> list[SkillCatalogEntry]:

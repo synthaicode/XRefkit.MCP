@@ -230,6 +230,88 @@ Every transferred Markdown link entry also repeats the resolver fields:
 }
 ```
 
+## Client-Side XID Document Cache
+
+Every XID-managed Markdown document uses its SHA-256 `content_hash` as an opaque
+version token. Clients can keep validated document bodies locally and perform a
+conditional MCP request:
+
+```json
+{
+  "xid": "8A666C1FD121",
+  "known_version": "<cached-content-hash>"
+}
+```
+
+When the version is unchanged and caching is cost-effective, the response has
+`cache_status: "not_modified"` and omits `content`. A missing or stale version
+returns the full current document. Calls that omit `known_version` retain the
+previous full-response behavior.
+
+For startup, pass all locally known versions in the first call:
+
+```json
+{
+  "known_document_versions": {
+    "8A666C1FD121": "<cached-content-hash>"
+  }
+}
+```
+
+Matching startup references retain routing metadata but set
+`content_omitted: true`; the client must use its locally hash-validated body.
+
+The package includes `XidDocumentCache`, which stores one JSON entry per XID,
+validates content hashes, removes corrupt entries, writes updates atomically,
+and exposes `known_versions()` for startup negotiation:
+
+```python
+from pathlib import Path
+
+from xrefkit_mcp import XidDocumentCache
+
+cache = XidDocumentCache(Path.home() / ".cache" / "xrefkit-mcp")
+
+
+async def fetch_document(xid: str, known_version: str | None) -> dict:
+    result = await session.call_tool(
+        "get_document_by_xid",
+        {"xid": xid, "known_version": known_version},
+    )
+    return result.structuredContent
+
+
+document = await cache.resolve("8A666C1FD121", fetch_document)
+
+
+async def fetch_startup(known_versions: dict[str, str]) -> dict:
+    result = await session.call_tool(
+        "get_startup_context",
+        {"known_document_versions": known_versions},
+    )
+    return result.structuredContent
+
+
+startup = await cache.resolve_startup(fetch_startup)
+```
+
+Caching is enabled per document only when the estimated conditional-version
+application payload is less than 50% of the full document payload. If the two
+costs are comparable, `cache_policy.cache_recommended` is false and the helper
+does not persist the document. The measurement excludes the fixed MCP envelope
+and reports both byte counts in the full document response.
+
+Do not send every cached version to every tool. `resolve_startup()` persists the
+previous startup XID set and sends only those versions. For other calls, use
+`known_versions(xids)` with only the documents required by that operation.
+
+On the current XRefKit repository snapshot, 295 of 301 XID documents pass the
+per-document cost gate; six small documents bypass caching. The implemented
+conditional request/response exchanges total 138,048 bytes versus 1,574,514
+bytes for the equivalent full responses, or 8.77%. A cached startup request and
+response total 30,545 bytes versus 58,643 bytes on first load, a 47.91%
+reduction.
+
 To inspect a Skill when the client has no local Skill files, call `get_skill`.
 The response includes:
 
@@ -240,6 +322,13 @@ The response includes:
 
 Resolve `meta_links[]` and `skill_links[]` the same way: call
 `get_document_by_xid` with the link `xid`.
+
+Cache-aware clients pass `known_document_versions` to `get_skill`. In that
+mode, `meta_content` and `skill_content` are `null` and `documents[]` contains
+the full or conditional XID document responses; pass each through
+`XidDocumentCache.materialize()`. Use `list_skills(include_content=false)` when
+only catalog metadata is needed; its `document_versions[]` identifies the two
+XIDs to pass to `known_versions(xids)`.
 
 ## Client-Side Python Tools
 
@@ -300,6 +389,7 @@ that output to be produced separately on the client side.
 xrefkit-mcp-catalog startup-context --repo C:\dev\itsm\XRefKit
 xrefkit-mcp-catalog list-workflows --repo C:\dev\itsm\XRefKit
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121
+xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121 --known-version <cached-content-hash>
 xrefkit-mcp-catalog get-skill --repo C:\dev\itsm\XRefKit --skill-id csharp_review
 xrefkit-mcp-catalog client-tool-manifest --repo C:\dev\itsm\XRefKit
 xrefkit-mcp-catalog get-client-tool-file --repo C:\dev\itsm\XRefKit --path tools/cs_scope_probe.py

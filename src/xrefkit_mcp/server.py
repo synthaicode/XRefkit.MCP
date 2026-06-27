@@ -73,8 +73,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     @app.tool()
-    def get_startup_context() -> dict[str, Any]:
-        return catalog.get_startup_context()
+    def get_startup_context(
+        known_document_versions: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return catalog.get_startup_context(known_document_versions)
 
     @app.tool()
     def list_knowledge_catalog(limit: int | None = None) -> list[dict[str, Any]]:
@@ -93,20 +95,29 @@ def main(argv: list[str] | None = None) -> int:
         return catalog.expand_knowledge(xid)
 
     @app.tool()
-    def get_document_by_xid(xid: str) -> dict[str, Any]:
-        return catalog.get_document_by_xid(xid)
+    def get_document_by_xid(
+        xid: str,
+        known_version: str | None = None,
+    ) -> dict[str, Any]:
+        return catalog.get_document_by_xid(xid, known_version)
 
     @app.tool()
     def build_knowledge_context(query: str, limit: int = 5) -> dict[str, Any]:
         return catalog.build_knowledge_context(query, limit)
 
     @app.tool()
-    def list_skills(limit: int | None = None) -> list[dict[str, Any]]:
-        return catalog.list_skills(limit)
+    def list_skills(
+        limit: int | None = None,
+        include_content: bool = True,
+    ) -> list[dict[str, Any]]:
+        return catalog.list_skills(limit, include_content)
 
     @app.tool()
-    def get_skill(skill_id: str) -> dict[str, Any]:
-        return catalog.get_skill(skill_id)
+    def get_skill(
+        skill_id: str,
+        known_document_versions: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return catalog.get_skill(skill_id, known_document_versions)
 
     @app.tool()
     def list_workflows() -> list[dict[str, Any]]:

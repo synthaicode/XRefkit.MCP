@@ -29,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     document = sub.add_parser("get-document", help="expand any managed Markdown document by XID")
     document.add_argument("--repo", required=True)
     document.add_argument("--xid", required=True)
+    document.add_argument("--known-version")
 
     context = sub.add_parser("build-knowledge-context", help="expand bounded knowledge context")
     context.add_argument("--repo", required=True)
@@ -38,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     skills = sub.add_parser("list-skills", help="list Skill catalog")
     skills.add_argument("--repo", required=True)
     skills.add_argument("--limit", type=int)
+    skills.add_argument("--exclude-content", action="store_true")
 
     skill = sub.add_parser("get-skill", help="get one Skill catalog entry with transferred content")
     skill.add_argument("--repo", required=True)
@@ -93,11 +95,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "expand-knowledge":
         payload = model.expand_knowledge(args.xid)
     elif args.command == "get-document":
-        payload = model.get_document_by_xid(args.xid)
+        payload = model.get_document_by_xid(args.xid, args.known_version)
     elif args.command == "build-knowledge-context":
         payload = model.build_knowledge_context(args.query, args.limit)
     elif args.command == "list-skills":
-        payload = model.list_skills(args.limit)
+        payload = model.list_skills(args.limit, not args.exclude_content)
     elif args.command == "get-skill":
         payload = model.get_skill(args.skill_id)
     elif args.command == "list-workflows":
