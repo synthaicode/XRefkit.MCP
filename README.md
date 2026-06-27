@@ -73,7 +73,42 @@ cd C:\dev\itsm\XRefkit.MCP
 python -m pip install -e ".[mcp]"
 ```
 
-## Run A Network Server
+## Run An HTTPS Server For Claude
+
+Claude custom connectors need a remote MCP endpoint that Claude can reach. Use
+Streamable HTTP over HTTPS with a public DNS name and a certificate issued by a
+publicly trusted CA. A self-signed certificate is suitable for local testing
+only; Claude cannot use a loopback, private-LAN, or otherwise unreachable URL.
+
+Provide the PEM certificate chain and matching private key directly:
+
+```powershell
+xrefkit-mcp-server `
+  --repo C:\dev\itsm\XRefKit `
+  --transport streamable-http `
+  --host 0.0.0.0 `
+  --port 443 `
+  --ssl-certfile C:\certs\fullchain.pem `
+  --ssl-keyfile C:\certs\privkey.pem
+```
+
+Then register this connector URL in Claude:
+
+```text
+https://mcp.example.com/mcp
+```
+
+Both TLS options are required together and are valid only with
+`streamable-http`. For a conventional production URL without an explicit port,
+terminate TLS on port 443 at a reverse proxy or gateway and forward requests to
+the server's local HTTP endpoint.
+
+HTTPS encrypts the connection but does not authenticate callers. This server is
+read-only, but it exposes repository governance and Skill content. Do not
+publish an authless endpoint containing confidential material; place it behind
+an access-controlled gateway when authentication is required.
+
+## Run A Development HTTP Server
 
 Use `streamable-http` for clients connecting over the network.
 
@@ -90,6 +125,9 @@ The client URL is:
 ```text
 http://<server-host>:8000/mcp
 ```
+
+Plain HTTP is intended for a trusted network or local development and is not a
+Claude custom connector deployment URL.
 
 Opening `/mcp` directly in a browser returns endpoint metadata only. MCP clients
 must use Streamable HTTP requests with `Accept: application/json,
@@ -115,7 +153,7 @@ Client configuration syntax differs by MCP client, but the required values are:
 {
   "name": "xrefkit",
   "transport": "streamable-http",
-  "url": "http://<server-host>:8000/mcp"
+  "url": "https://mcp.example.com/mcp"
 }
 ```
 
@@ -126,7 +164,7 @@ If a client uses an `mcpServers` map, the equivalent shape is:
   "mcpServers": {
     "xrefkit": {
       "transport": "streamable-http",
-      "url": "http://<server-host>:8000/mcp"
+      "url": "https://mcp.example.com/mcp"
     }
   }
 }
