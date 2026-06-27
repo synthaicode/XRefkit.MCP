@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 
-XID_RE = re.compile(r"xid[:=-]([A-Za-z0-9]+)|#xid-([A-Za-z0-9]+)")
+XID_RE = re.compile(r"xid[:=-]\s*([A-Za-z0-9]+)|#xid-([A-Za-z0-9]+)")
 HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 MD_LINK_RE = re.compile(r"\]\((?P<target>[^)]+#xid-(?P<xid>[A-Za-z0-9]+))\)")
 
@@ -17,6 +17,11 @@ def read_text(path: Path) -> str:
 
 def stable_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def repository_fingerprint(repo_root: Path) -> str:
+    normalized_root = repo_root.resolve().as_posix().casefold()
+    return stable_hash(f"resolved-repository-root:{normalized_root}")[:32]
 
 
 def first_xid(text: str) -> str | None:

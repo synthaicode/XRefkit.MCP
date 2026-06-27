@@ -73,7 +73,42 @@ cd C:\dev\itsm\XRefkit.MCP
 python -m pip install -e ".[mcp]"
 ```
 
-## Run A Network Server
+## Run An HTTPS Server For Claude
+
+Claude custom connectors need a remote MCP endpoint that Claude can reach. Use
+Streamable HTTP over HTTPS with a public DNS name and a certificate issued by a
+publicly trusted CA. A self-signed certificate is suitable for local testing
+only; Claude cannot use a loopback, private-LAN, or otherwise unreachable URL.
+
+Provide the PEM certificate chain and matching private key directly:
+
+```powershell
+xrefkit-mcp-server `
+  --repo C:\dev\itsm\XRefKit `
+  --transport streamable-http `
+  --host 0.0.0.0 `
+  --port 443 `
+  --ssl-certfile C:\certs\fullchain.pem `
+  --ssl-keyfile C:\certs\privkey.pem
+```
+
+Then register this connector URL in Claude:
+
+```text
+https://mcp.example.com/mcp
+```
+
+Both TLS options are required together and are valid only with
+`streamable-http`. For a conventional production URL without an explicit port,
+terminate TLS on port 443 at a reverse proxy or gateway and forward requests to
+the server's local HTTP endpoint.
+
+HTTPS encrypts the connection but does not authenticate callers. This server is
+read-only, but it exposes repository governance and Skill content. Do not
+publish an authless endpoint containing confidential material; place it behind
+an access-controlled gateway when authentication is required.
+
+## Run A Development HTTP Server
 
 Use `streamable-http` for clients connecting over the network.
 
@@ -90,6 +125,9 @@ The client URL is:
 ```text
 http://<server-host>:8000/mcp
 ```
+
+Plain HTTP is intended for a trusted network or local development and is not a
+Claude custom connector deployment URL.
 
 Opening `/mcp` directly in a browser returns endpoint metadata only. MCP clients
 must use Streamable HTTP requests with `Accept: application/json,
@@ -115,7 +153,7 @@ Client configuration syntax differs by MCP client, but the required values are:
 {
   "name": "xrefkit",
   "transport": "streamable-http",
-  "url": "http://<server-host>:8000/mcp"
+  "url": "https://mcp.example.com/mcp"
 }
 ```
 
@@ -126,7 +164,7 @@ If a client uses an `mcpServers` map, the equivalent shape is:
   "mcpServers": {
     "xrefkit": {
       "transport": "streamable-http",
-      "url": "http://<server-host>:8000/mcp"
+      "url": "https://mcp.example.com/mcp"
     }
   }
 }
@@ -192,6 +230,101 @@ Every transferred Markdown link entry also repeats the resolver fields:
 }
 ```
 
+## Client-Side XID Document Cache
+
+Every XID-managed Markdown document uses its SHA-256 `content_hash` as an opaque
+version token. Clients can keep validated document bodies locally and perform a
+conditional MCP request:
+
+The complete protocol and client boundary are documented in
+[XID Document Client Cache](docs/xid-document-cache.md).
+
+```json
+{
+  "xid": "8A666C1FD121",
+  "known_version": "<cached-content-hash>"
+}
+```
+
+When the version is unchanged and caching is cost-effective, the response has
+`cache_status: "not_modified"` and omits `content`. A missing or stale version
+returns the full current document. Calls that omit `known_version` retain the
+previous full-response behavior.
+
+For startup, pass all locally known versions in the first call:
+
+```json
+{
+  "known_document_versions": {
+    "8A666C1FD121": "<cached-content-hash>"
+  }
+}
+```
+
+Matching startup references retain routing metadata but set
+`content_omitted: true`; the client must use its locally hash-validated body.
+
+The package includes `XidDocumentCache`, which stores one JSON entry per XID,
+validates content hashes, removes corrupt entries, writes updates atomically,
+and exposes `known_versions()` for startup negotiation:
+
+`get_repository_identity` is a content-free cache namespace preflight.
+`get_startup_context` remains the first governance-content load.
+
+```python
+from pathlib import Path
+
+from xrefkit_mcp import XidDocumentCache
+
+identity_result = await session.call_tool("get_repository_identity", {})
+repository_fingerprint = identity_result.structuredContent[
+    "repository_fingerprint"
+]
+cache = XidDocumentCache(
+    Path.home() / ".cache" / "xrefkit-mcp",
+    repository_fingerprint,
+)
+
+
+async def fetch_document(xid: str, known_version: str | None) -> dict:
+    result = await session.call_tool(
+        "get_document_by_xid",
+        {"xid": xid, "known_version": known_version},
+    )
+    return result.structuredContent
+
+
+document = await cache.resolve("8A666C1FD121", fetch_document)
+
+
+async def fetch_startup(known_versions: dict[str, str]) -> dict:
+    result = await session.call_tool(
+        "get_startup_context",
+        {"known_document_versions": known_versions},
+    )
+    return result.structuredContent
+
+
+startup = await cache.resolve_startup(fetch_startup)
+```
+
+Caching is enabled per document only when the estimated conditional-version
+application payload is less than 50% of the full document payload. If the two
+costs are comparable, `cache_policy.cache_recommended` is false and the helper
+does not persist the document. The measurement excludes the fixed MCP envelope
+and reports both byte counts in the full document response.
+
+Do not send every cached version to every tool. `resolve_startup()` persists the
+previous startup XID set and sends only those versions. For other calls, use
+`known_versions(xids)` with only the documents required by that operation.
+
+On the current XRefKit repository snapshot, 294 of 301 XID documents pass the
+per-document cost gate; seven small documents bypass caching. The implemented
+conditional request/response exchanges total 155,183 bytes versus 1,592,578
+bytes for the equivalent full responses, or 9.74%. A cached startup request and
+response total 31,122 bytes versus 59,219 bytes on first load, a 47.45%
+reduction.
+
 To inspect a Skill when the client has no local Skill files, call `get_skill`.
 The response includes:
 
@@ -202,6 +335,13 @@ The response includes:
 
 Resolve `meta_links[]` and `skill_links[]` the same way: call
 `get_document_by_xid` with the link `xid`.
+
+Cache-aware clients pass `known_document_versions` to `get_skill`. In that
+mode, `meta_content` and `skill_content` are `null` and `documents[]` contains
+the full or conditional XID document responses; pass each through
+`XidDocumentCache.materialize()`. Use `list_skills(include_content=false)` when
+only catalog metadata is needed; its `document_versions[]` identifies the two
+XIDs to pass to `known_versions(xids)`.
 
 ## Client-Side Python Tools
 
@@ -262,6 +402,7 @@ that output to be produced separately on the client side.
 xrefkit-mcp-catalog startup-context --repo C:\dev\itsm\XRefKit
 xrefkit-mcp-catalog list-workflows --repo C:\dev\itsm\XRefKit
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121
+xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121 --known-version <cached-content-hash>
 xrefkit-mcp-catalog get-skill --repo C:\dev\itsm\XRefKit --skill-id csharp_review
 xrefkit-mcp-catalog client-tool-manifest --repo C:\dev\itsm\XRefKit
 xrefkit-mcp-catalog get-client-tool-file --repo C:\dev\itsm\XRefKit --path tools/cs_scope_probe.py

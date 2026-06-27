@@ -7,8 +7,16 @@ import io
 import zipfile
 from pathlib import Path
 
-from xrefkit_mcp.catalog import XRefCatalog
-from xrefkit_mcp.schemas import ToolContract
+from xrefkit_mcp.catalog import (
+    CACHE_MAX_VERSION_PAYLOAD_RATIO,
+    XRefCatalog,
+    _conditional_document_response,
+    _document_cache_policy,
+)
+from xrefkit_mcp.schemas import ToolContract, XRefDocument
+
+
+REPOSITORY_FINGERPRINT = "a" * 32
 
 
 def write(path: Path, content: str) -> None:
@@ -70,6 +78,10 @@ Use [Context Rules](../../knowledge/organization/rules.md#xid-ABC123).
             ("docs/053_context_direction_security_guard.md", "GUARD", "Context Direction Security Guard"),
             ("docs/015_shared_memory_operations.md", "MEMORY", "Shared Memory Operations"),
         ]:
+            detail = "\n".join(
+                "Detailed startup governance content used to exercise conditional retrieval."
+                for _ in range(20)
+            )
             write(
                 self.repo / rel_path,
                 f"""<!-- xid: {xid} -->
@@ -78,6 +90,8 @@ Use [Context Rules](../../knowledge/organization/rules.md#xid-ABC123).
 # {title}
 
 Required startup reference. See [Uncertainty](016_uncertainty_protocol.md#xid-UNCERTAINTY).
+
+{detail}
 """,
             )
         write(
@@ -136,6 +150,10 @@ if __name__ == "__main__":
         self.assertIn("Skill: sample_review", catalog.skills[0].skill_content)
         self.assertEqual(catalog.skills[0].skill_links[0]["xid"], "ABC123")
         self.assertEqual(catalog.skills[0].skill_links[0]["resolver_tool"], "get_document_by_xid")
+        self.assertEqual(
+            catalog.get_repository_identity()["cache_namespace"],
+            catalog.repository_fingerprint,
+        )
 
     def test_expands_knowledge_by_xid(self) -> None:
         catalog = XRefCatalog.build(self.repo)
@@ -167,6 +185,37 @@ if __name__ == "__main__":
         self.assertIn("Skill: sample_review", skill["skill_content"])
         self.assertEqual(skill["skill_links"][0]["xid"], "ABC123")
         self.assertEqual(skill["skill_links"][0]["resolver_tool"], "get_document_by_xid")
+
+    def test_cache_aware_skill_returns_conditional_xid_documents(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+        first = catalog.get_skill("sample_review", {})
+        versions = {
+            document["xid"]: document["content_hash"]
+            for document in first["documents"]
+            if document["cache_policy"]["cache_recommended"]
+        }
+
+        cached = catalog.get_skill("sample_review", versions)
+
+        self.assertIsNone(cached["meta_content"])
+        self.assertIsNone(cached["skill_content"])
+        self.assertEqual(len(cached["documents"]), 2)
+        for document in cached["documents"]:
+            if document["xid"] in versions:
+                self.assertEqual(document["cache_status"], "not_modified")
+                self.assertNotIn("content", document)
+
+    def test_list_skills_can_exclude_document_bodies(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+
+        skill = catalog.list_skills(include_content=False)[0]
+
+        self.assertIsNone(skill["meta_content"])
+        self.assertIsNone(skill["skill_content"])
+        self.assertEqual(
+            {document["xid"] for document in skill["document_versions"]},
+            {"SKILLMETA", "SKILLDOC"},
+        )
 
     def test_rejects_server_tool_with_side_effects(self) -> None:
         contract = ToolContract(
@@ -219,6 +268,26 @@ if __name__ == "__main__":
             context["runtime_role_contract"]["invariants"],
         )
 
+    def test_startup_context_omits_cached_reference_bodies(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+        first = catalog.get_startup_context()
+        versions = {
+            reference["xid"]: reference["content_hash"]
+            for reference in first["references"]
+        }
+
+        cached = catalog.get_startup_context(versions)
+
+        self.assertTrue(
+            all(reference["cache_status"] == "not_modified" for reference in cached["references"])
+        )
+        self.assertTrue(
+            all(reference["content_omitted"] for reference in cached["references"])
+        )
+        self.assertTrue(
+            all(reference["content"] is None for reference in cached["references"])
+        )
+
     def test_lists_workflows(self) -> None:
         catalog = XRefCatalog.build(self.repo)
 
@@ -235,6 +304,56 @@ if __name__ == "__main__":
 
         self.assertEqual(document["path"], "docs/016_uncertainty_protocol.md")
         self.assertIn("# Uncertainty Protocol", document["content"])
+        self.assertEqual(document["version"], document["content_hash"])
+        self.assertIs(document["cache_policy"]["cache_recommended"], True)
+
+    def test_conditional_document_resolution_omits_unchanged_content(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+        document = catalog.get_document_by_xid("UNCERTAINTY")
+
+        unchanged = catalog.get_document_by_xid(
+            "UNCERTAINTY",
+            document["content_hash"],
+        )
+        stale = catalog.get_document_by_xid("UNCERTAINTY", "stale-version")
+
+        self.assertEqual(unchanged["cache_status"], "not_modified")
+        self.assertIs(unchanged["content_omitted"], True)
+        self.assertNotIn("content", unchanged)
+        self.assertEqual(stale["cache_status"], "modified")
+        self.assertIn("# Uncertainty Protocol", stale["content"])
+
+    def test_cache_policy_bypasses_when_version_payload_is_not_smaller(self) -> None:
+        document = XRefDocument(
+            xid="A",
+            title="",
+            path="a",
+            summary="",
+            content="x",
+            links=[],
+            content_hash="0" * 64,
+        )
+
+        policy = _document_cache_policy(document, REPOSITORY_FINGERPRINT)
+
+        self.assertEqual(policy["maximum_ratio"], CACHE_MAX_VERSION_PAYLOAD_RATIO)
+        self.assertIs(policy["cache_recommended"], False)
+
+        first = _conditional_document_response(
+            document,
+            None,
+            REPOSITORY_FINGERPRINT,
+        )
+        conditional = _conditional_document_response(
+            document,
+            document.content_hash,
+            REPOSITORY_FINGERPRINT,
+        )
+
+        self.assertEqual(first["cache_status"], "miss")
+        self.assertIs(first["cache_policy"]["cache_recommended"], False)
+        self.assertEqual(conditional["cache_status"], "bypassed")
+        self.assertIn("content", conditional)
 
     def test_distributes_client_side_python_tools_without_server_execution(self) -> None:
         catalog = XRefCatalog.build(self.repo)

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from xrefkit_mcp.server import (
     SERVER_VERSION,
     _endpoint_info,
     _should_return_endpoint_info,
+    _validate_tls_configuration,
 )
 
 
@@ -48,6 +51,43 @@ class StreamableHttpProbeTests(unittest.TestCase):
         self.assertEqual(info["transport"], "streamable-http")
         self.assertEqual(info["endpoint"], "/mcp")
         self.assertIn("Accept: application/json, text/event-stream", info["message"])
+
+
+class TlsConfigurationTests(unittest.TestCase):
+    def test_cert_and_key_enable_tls_for_streamable_http(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            certfile = Path(temp_dir, "fullchain.pem")
+            keyfile = Path(temp_dir, "privkey.pem")
+            certfile.touch()
+            keyfile.touch()
+
+            _validate_tls_configuration("streamable-http", certfile, keyfile)
+
+    def test_cert_and_key_must_be_provided_together(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            certfile = Path(temp_dir, "fullchain.pem")
+            certfile.touch()
+
+            with self.assertRaisesRegex(ValueError, "must be provided together"):
+                _validate_tls_configuration("streamable-http", certfile, None)
+
+    def test_tls_is_rejected_for_stdio(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            certfile = Path(temp_dir, "fullchain.pem")
+            keyfile = Path(temp_dir, "privkey.pem")
+            certfile.touch()
+            keyfile.touch()
+
+            with self.assertRaisesRegex(ValueError, "only with --transport streamable-http"):
+                _validate_tls_configuration("stdio", certfile, keyfile)
+
+    def test_missing_tls_file_is_rejected(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            certfile = Path(temp_dir, "missing-fullchain.pem")
+            keyfile = Path(temp_dir, "missing-privkey.pem")
+
+            with self.assertRaisesRegex(ValueError, "certificate file does not exist"):
+                _validate_tls_configuration("streamable-http", certfile, keyfile)
 
 
 if __name__ == "__main__":

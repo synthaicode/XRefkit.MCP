@@ -6,9 +6,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .catalog import XRefCatalog
 
-SERVER_VERSION = "0.1.2"
+SERVER_VERSION = __version__
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,7 +34,26 @@ def main(argv: list[str] | None = None) -> int:
         choices=["debug", "info", "warning", "error", "critical"],
         help="HTTP server log level for network transports",
     )
+    parser.add_argument(
+        "--ssl-certfile",
+        type=Path,
+        help="PEM certificate chain for HTTPS streamable-http",
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        type=Path,
+        help="PEM private key for HTTPS streamable-http",
+    )
     args = parser.parse_args(argv)
+    try:
+        _validate_tls_configuration(
+            args.transport,
+            args.ssl_certfile,
+            args.ssl_keyfile,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
     catalog = XRefCatalog.build(Path(args.repo))
 
     try:
@@ -53,8 +73,14 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     @app.tool()
-    def get_startup_context() -> dict[str, Any]:
-        return catalog.get_startup_context()
+    def get_repository_identity() -> dict[str, str]:
+        return catalog.get_repository_identity()
+
+    @app.tool()
+    def get_startup_context(
+        known_document_versions: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return catalog.get_startup_context(known_document_versions)
 
     @app.tool()
     def list_knowledge_catalog(limit: int | None = None) -> list[dict[str, Any]]:
@@ -73,20 +99,29 @@ def main(argv: list[str] | None = None) -> int:
         return catalog.expand_knowledge(xid)
 
     @app.tool()
-    def get_document_by_xid(xid: str) -> dict[str, Any]:
-        return catalog.get_document_by_xid(xid)
+    def get_document_by_xid(
+        xid: str,
+        known_version: str | None = None,
+    ) -> dict[str, Any]:
+        return catalog.get_document_by_xid(xid, known_version)
 
     @app.tool()
     def build_knowledge_context(query: str, limit: int = 5) -> dict[str, Any]:
         return catalog.build_knowledge_context(query, limit)
 
     @app.tool()
-    def list_skills(limit: int | None = None) -> list[dict[str, Any]]:
-        return catalog.list_skills(limit)
+    def list_skills(
+        limit: int | None = None,
+        include_content: bool = True,
+    ) -> list[dict[str, Any]]:
+        return catalog.list_skills(limit, include_content)
 
     @app.tool()
-    def get_skill(skill_id: str) -> dict[str, Any]:
-        return catalog.get_skill(skill_id)
+    def get_skill(
+        skill_id: str,
+        known_document_versions: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return catalog.get_skill(skill_id, known_document_versions)
 
     @app.tool()
     def list_workflows() -> list[dict[str, Any]]:
@@ -125,13 +160,46 @@ def main(argv: list[str] | None = None) -> int:
         return catalog.check_client_tool_versions(installed)
 
     if args.transport == "streamable-http":
-        _run_streamable_http(app, args.host, args.port, args.http_path, args.log_level)
+        _run_streamable_http(
+            app,
+            args.host,
+            args.port,
+            args.http_path,
+            args.log_level,
+            args.ssl_certfile,
+            args.ssl_keyfile,
+        )
     else:
         app.run(transport=args.transport)
     return 0
 
 
-def _run_streamable_http(app: Any, host: str, port: int, http_path: str, log_level: str) -> None:
+def _validate_tls_configuration(
+    transport: str,
+    ssl_certfile: Path | None,
+    ssl_keyfile: Path | None,
+) -> None:
+    if (ssl_certfile is None) != (ssl_keyfile is None):
+        raise ValueError("--ssl-certfile and --ssl-keyfile must be provided together")
+    if ssl_certfile is None:
+        return
+    if transport != "streamable-http":
+        raise ValueError("TLS options are supported only with --transport streamable-http")
+    if not ssl_certfile.is_file():
+        raise ValueError(f"TLS certificate file does not exist: {ssl_certfile}")
+    if not ssl_keyfile.is_file():
+        raise ValueError(f"TLS private-key file does not exist: {ssl_keyfile}")
+
+
+def _run_streamable_http(
+    app: Any,
+    host: str,
+    port: int,
+    http_path: str,
+    log_level: str,
+    ssl_certfile: Path | None = None,
+    ssl_keyfile: Path | None = None,
+) -> None:
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -146,6 +214,8 @@ def _run_streamable_http(app: Any, host: str, port: int, http_path: str, log_lev
             host=host,
             port=port,
             log_level=log_level.lower(),
+            ssl_certfile=str(ssl_certfile) if ssl_certfile else None,
+            ssl_keyfile=str(ssl_keyfile) if ssl_keyfile else None,
         )
         server = uvicorn.Server(config)
         await server.serve()
