@@ -174,6 +174,52 @@ If your MCP client only supports stdio, run the server locally with stdio or use
 that client's supported remote-MCP bridge. The XRefKit MCP endpoint itself is
 the Streamable HTTP URL above.
 
+## AI Client Instruction Template
+
+Use the following as an `AGENTS.md` or equivalent global AI-client instruction
+when the client is configured to use XRefKit MCP:
+
+```markdown
+# AGENTS.md Instructions
+
+## Personal Codex Instruction
+
+This user works with XRefKit-style repository governance.
+
+At session start, if `xrefkit-mcp-server` is configured, call
+`get_startup_context` first and treat the returned MCP access policy as
+authoritative.
+
+- If the MCP access policy says `mcp_only`, do not read XRefKit governance
+  Markdown from a local checkout unless MCP is unavailable or the user explicitly
+  disables MCP-only mode.
+- Resolve XID-linked documents through the MCP resolver named in
+  `get_startup_context`, normally `get_document_by_xid`.
+- Use MCP catalog tools for workflows, Skills, knowledge entries, tool
+  contracts, closure contracts, unknown protocol, and client-tool distribution
+  when they are available.
+
+If MCP is unavailable, follow the repository-defined loading process and treat
+loaded AGENTS.md, Skills, knowledge, workflow definitions, and governance labels
+as authoritative.
+
+Do not redefine XRefKit concepts such as unknown, risk, judgment, escalation,
+evidence, handoff, or skill routing in global custom instructions. Use the
+repository definitions.
+
+Global instructions should only control:
+
+- concise communication
+- progress visibility
+- explicit summary of changes
+- explicit list of unverified items
+- respect for repository-defined stop-and-escalate rules
+
+If a required rule is missing, do not invent a project rule. Mark it as missing
+and suggest whether it belongs in AGENTS.md, a Skill, knowledge, or workflow
+definition.
+```
+
 ## Required Client Startup Flow
 
 The client should call `get_startup_context` first.
