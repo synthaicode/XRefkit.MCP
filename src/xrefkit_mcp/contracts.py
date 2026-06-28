@@ -37,6 +37,7 @@ def builtin_tool_contracts() -> list[ToolContract]:
             output_schema={"entries": "knowledge_catalog_entries"},
             requires_workspace=True,
             required_when="Catalog browsing is needed without expanding knowledge body.",
+            response_envelope="mcp_result_array",
         ),
         ToolContract(
             tool_id="xref.search_knowledge_catalog",
@@ -48,6 +49,7 @@ def builtin_tool_contracts() -> list[ToolContract]:
             output_schema={"entries": "knowledge_catalog_entries"},
             requires_workspace=True,
             required_when="A purpose or question must be matched to XID-backed knowledge.",
+            response_envelope="mcp_result_array",
         ),
         ToolContract(
             tool_id="xref.expand_knowledge",
@@ -92,6 +94,7 @@ def builtin_tool_contracts() -> list[ToolContract]:
             output_schema={"entries": "skill_catalog_entries"},
             requires_workspace=True,
             required_when="Available Skills must be listed without executing them.",
+            response_envelope="mcp_result_array",
         ),
         ToolContract(
             tool_id="xref.get_skill",
@@ -117,6 +120,7 @@ def builtin_tool_contracts() -> list[ToolContract]:
             output_schema={"entries": "workflow_catalog_entries"},
             requires_workspace=True,
             required_when="The client needs visible workflow order and flow definitions before routing work.",
+            response_envelope="mcp_result_array",
         ),
         ToolContract(
             tool_id="xref.rank_skills_for_purpose",
@@ -128,6 +132,7 @@ def builtin_tool_contracts() -> list[ToolContract]:
             output_schema={"results": "skill_rank_results"},
             requires_workspace=True,
             required_when="The consumer needs candidate Skills with evidence, not an automatic decision.",
+            response_envelope="mcp_result_array",
         ),
         ToolContract(
             tool_id="xref.list_tool_contracts",
@@ -139,6 +144,7 @@ def builtin_tool_contracts() -> list[ToolContract]:
             output_schema={"contracts": "tool_contracts"},
             requires_workspace=False,
             required_when="The client performs capability handshake or audit.",
+            response_envelope="mcp_result_array",
         ),
         ToolContract(
             tool_id="xref.get_client_tool_manifest",

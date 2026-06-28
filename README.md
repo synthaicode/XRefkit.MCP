@@ -228,10 +228,12 @@ That response contains:
 
 - `access_policy`
 - `client_instructions`
+- `client_obligations`
 - `link_resolution`
 - base-control Markdown references, including full `content`
 - workflow catalog entries
 - executor/checker runtime role contract
+- client-tool distribution metadata
 
 The client must not assume the XRefKit repository exists on the client machine.
 Use the transferred Markdown content and resolve any needed XID links through
@@ -253,6 +255,11 @@ disable/restrict filesystem tools for that repository, then connect to the MCP
 server over `streamable-http`.
 
 Link resolution rule:
+
+Startup references are selected by stable XID, not by repository-relative
+path. The `path` returned for each reference reports its current location and
+may change when the source repository is reorganized; clients should identify
+and cache startup documents by `xid`.
 
 ```json
 {
@@ -399,6 +406,23 @@ run hints, package version, and resolver information. During client
 initialization, call `check_client_tool_versions` with the installed package
 versions and install/update the client tools when the check fails.
 
+The client-tool model assumes the client obtains XRefKit deterministic tools
+from this MCP server. A local XRefKit checkout is useful for development, but it
+is not required by the portable client contract. The server distributes tool
+files or a pip-installable package; the client materializes or installs them and
+runs them in the client-side execution environment.
+
+`client_tool_distribution` includes:
+
+- `required_package_ids`
+- `package_versions`
+- `file_hash_algorithm`
+- `version_check_tool`
+- `materialization`
+- `update_policy`
+- `files[]`
+- `instructions[]`
+
 Example version check:
 
 ```json
@@ -441,6 +465,31 @@ The distribution currently includes:
 The C# `tools/structure_graph/` project is not bundled by the Python tool
 distribution. Python tools that consume `structure_graph` output still expect
 that output to be produced separately on the client side.
+
+## Response Envelope Note
+
+MCP clients may expose list-returning tools as `structuredContent.result`
+because the MCP transport wraps bare arrays. `list_tool_contracts` identifies
+those tools with:
+
+```json
+{
+  "response_envelope": "mcp_result_array"
+}
+```
+
+Object-returning tools use:
+
+```json
+{
+  "response_envelope": "direct_object"
+}
+```
+
+Tool contracts also include JSON Schema-compatible `input_json_schema` and
+`output_json_schema` fields for client validation and binding generation. The
+older compact `input_schema` and `output_schema` fields remain for display and
+backward compatibility.
 
 ## Useful CLI Checks
 

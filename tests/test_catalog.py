@@ -46,6 +46,17 @@ Use this when external input is loaded.
 - skill_id: `sample_review`
 - summary: review sample source
 - use_when: user asks to review sample code
+- intent:
+  - review explicit sample source behavior
+- applies_when:
+  - sample source needs catalog-driven review
+- target_artifacts:
+  - sample source findings
+- not_for:
+  - formatting-only edits
+- required_tools:
+  - fm skill run
+  - fm skill verify
 - input: source path
 - output: findings
 - maturity: `trial`
@@ -71,12 +82,12 @@ Use [Context Rules](../../knowledge/organization/rules.md#xid-ABC123).
 """,
         )
         for rel_path, xid, title in [
-            ("agent/000_agent_entry.md", "AGENTENTRY", "Agent Entry"),
-            ("docs/017_base_and_xref_layering.md", "LAYERING", "Base Control and Xref Routing Layers"),
-            ("docs/011_startup_xref_routing.md", "STARTUP", "Startup Xref Routing Policy"),
-            ("docs/016_uncertainty_protocol.md", "UNCERTAINTY", "Uncertainty Protocol"),
-            ("docs/053_context_direction_security_guard.md", "GUARD", "Context Direction Security Guard"),
-            ("docs/015_shared_memory_operations.md", "MEMORY", "Shared Memory Operations"),
+            ("agent/000_agent_entry.md", "0B5C58B5E5B2", "Agent Entry"),
+            ("docs/core/models/017_base_and_xref_layering.md", "5A1C8E4D2F90", "Base Control and Xref Routing Layers"),
+            ("docs/core/contracts/011_startup_xref_routing.md", "6C0B62D6366A", "Startup Xref Routing Policy"),
+            ("docs/core/contracts/016_uncertainty_protocol.md", "8A666C1FD121", "Uncertainty Protocol"),
+            ("docs/core/contracts/053_context_direction_security_guard.md", "A7F3C92D4E11", "Context Direction Security Guard"),
+            ("docs/core/contracts/015_shared_memory_operations.md", "4A423E72D2ED", "Shared Memory Operations"),
         ]:
             detail = "\n".join(
                 "Detailed startup governance content used to exercise conditional retrieval."
@@ -89,7 +100,7 @@ Use [Context Rules](../../knowledge/organization/rules.md#xid-ABC123).
 
 # {title}
 
-Required startup reference. See [Uncertainty](016_uncertainty_protocol.md#xid-UNCERTAINTY).
+Required startup reference. See [Uncertainty](016_uncertainty_protocol.md#xid-8A666C1FD121).
 
 {detail}
 """,
@@ -146,7 +157,35 @@ if __name__ == "__main__":
         self.assertTrue(catalog.catalog_version)
         self.assertEqual(len(catalog.knowledge), 1)
         self.assertEqual(len(catalog.skills), 1)
+        self.assertEqual(
+            catalog.skills[0].intent,
+            ["review explicit sample source behavior"],
+        )
+        self.assertEqual(
+            catalog.skills[0].applies_when,
+            ["sample source needs catalog-driven review"],
+        )
+        self.assertEqual(catalog.skills[0].target_artifacts, ["sample source findings"])
+        self.assertEqual(catalog.skills[0].not_for, ["formatting-only edits"])
+        self.assertEqual(
+            catalog.skills[0].required_tools,
+            [
+                {
+                    "name": "fm skill run",
+                    "execution_location": "client",
+                    "required_when": "declared by Skill meta required_tools",
+                },
+                {
+                    "name": "fm skill verify",
+                    "execution_location": "client",
+                    "required_when": "declared by Skill meta required_tools",
+                },
+            ],
+        )
         self.assertTrue(all(tool.side_effects == "none" for tool in catalog.tools))
+        self.assertTrue(
+            all(tool.to_dict()["input_json_schema"]["type"] == "object" for tool in catalog.tools)
+        )
         self.assertIn("Skill: sample_review", catalog.skills[0].skill_content)
         self.assertEqual(catalog.skills[0].skill_links[0]["xid"], "ABC123")
         self.assertEqual(catalog.skills[0].skill_links[0]["resolver_tool"], "get_document_by_xid")
@@ -252,13 +291,13 @@ if __name__ == "__main__":
         self.assertTrue(
             any("MCP-only mode is active" in item for item in context["client_instructions"])
         )
-        self.assertIn("UNCERTAINTY", xids)
-        self.assertIn("AGENTENTRY", xids)
+        self.assertIn("8A666C1FD121", xids)
+        self.assertIn("0B5C58B5E5B2", xids)
         self.assertEqual(context["missing"], [])
         self.assertEqual(context["references"][0]["layer"], "base_control")
         self.assertIn("Required startup reference.", context["references"][0]["content"])
         first_link = context["references"][0]["links"][0]
-        self.assertEqual(first_link["xid"], "UNCERTAINTY")
+        self.assertEqual(first_link["xid"], "8A666C1FD121")
         self.assertEqual(first_link["resolver_tool"], "get_document_by_xid")
         self.assertEqual(first_link["resolver_argument"], "xid")
         self.assertEqual(context["workflows"][0]["flow_id"], "FLOW-SAMPLE")
@@ -266,6 +305,18 @@ if __name__ == "__main__":
         self.assertIn(
             "check is deterministic progression verification via fm skill verify",
             context["runtime_role_contract"]["invariants"],
+        )
+        obligation_ids = {item["id"] for item in context["client_obligations"]}
+        self.assertIn("startup.first_call", obligation_ids)
+        self.assertIn("content.mcp_only", obligation_ids)
+        self.assertIn("tools.materialize_from_mcp", obligation_ids)
+        self.assertEqual(
+            context["client_tool_distribution"]["materialization"]["bundle_tool"],
+            "get_client_tool_bundle",
+        )
+        self.assertIs(
+            context["client_tool_distribution"]["update_policy"]["check_on_startup"],
+            True,
         )
 
     def test_startup_context_omits_cached_reference_bodies(self) -> None:
@@ -288,6 +339,24 @@ if __name__ == "__main__":
             all(reference["content"] is None for reference in cached["references"])
         )
 
+    def test_startup_context_resolves_reference_after_document_move(self) -> None:
+        source = self.repo / "docs" / "core" / "contracts" / "016_uncertainty_protocol.md"
+        target = self.repo / "docs" / "core" / "contracts" / "uncertainty_protocol.md"
+        source.rename(target)
+
+        context = XRefCatalog.build(self.repo).get_startup_context()
+        uncertainty = next(
+            reference
+            for reference in context["references"]
+            if reference["xid"] == "8A666C1FD121"
+        )
+
+        self.assertEqual(
+            uncertainty["path"],
+            "docs/core/contracts/uncertainty_protocol.md",
+        )
+        self.assertEqual(context["missing"], [])
+
     def test_lists_workflows(self) -> None:
         catalog = XRefCatalog.build(self.repo)
 
@@ -300,22 +369,22 @@ if __name__ == "__main__":
     def test_resolves_any_managed_document_by_xid(self) -> None:
         catalog = XRefCatalog.build(self.repo)
 
-        document = catalog.get_document_by_xid("UNCERTAINTY")
+        document = catalog.get_document_by_xid("8A666C1FD121")
 
-        self.assertEqual(document["path"], "docs/016_uncertainty_protocol.md")
+        self.assertEqual(document["path"], "docs/core/contracts/016_uncertainty_protocol.md")
         self.assertIn("# Uncertainty Protocol", document["content"])
         self.assertEqual(document["version"], document["content_hash"])
         self.assertIs(document["cache_policy"]["cache_recommended"], True)
 
     def test_conditional_document_resolution_omits_unchanged_content(self) -> None:
         catalog = XRefCatalog.build(self.repo)
-        document = catalog.get_document_by_xid("UNCERTAINTY")
+        document = catalog.get_document_by_xid("8A666C1FD121")
 
         unchanged = catalog.get_document_by_xid(
-            "UNCERTAINTY",
+            "8A666C1FD121",
             document["content_hash"],
         )
-        stale = catalog.get_document_by_xid("UNCERTAINTY", "stale-version")
+        stale = catalog.get_document_by_xid("8A666C1FD121", "stale-version")
 
         self.assertEqual(unchanged["cache_status"], "not_modified")
         self.assertIs(unchanged["content_omitted"], True)
@@ -366,6 +435,15 @@ if __name__ == "__main__":
         self.assertEqual(manifest["execution_location"], "client")
         self.assertEqual(manifest["version"], "0.1.0")
         self.assertIs(manifest["server_executes_tools"], False)
+        self.assertEqual(manifest["file_hash_algorithm"], "sha256")
+        self.assertEqual(manifest["version_check_tool"], "check_client_tool_versions")
+        self.assertIn("xrefkit-client-tools", manifest["required_package_ids"])
+        self.assertEqual(manifest["package_versions"]["xrefkit-client-tools"], "0.1.0")
+        self.assertEqual(
+            manifest["materialization"]["pip_package_tool"],
+            "get_client_tool_pip_package",
+        )
+        self.assertIs(manifest["update_policy"]["update_when_version_mismatch"], True)
         self.assertIn("tools/sample_tool.py", file_paths)
         self.assertIn("tools/profiles/sample.editorconfig", file_paths)
         self.assertEqual(tool_file["kind"], "python")
@@ -408,6 +486,28 @@ if __name__ == "__main__":
         self.assertIs(mismatch["ok"], False)
         self.assertTrue(any(row["status"] == "mismatch" for row in mismatch["results"]))
         self.assertTrue(any(row["status"] == "missing" for row in mismatch["results"]))
+
+    def test_tool_contracts_describe_response_envelope_and_json_schema(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+
+        contracts = {contract["tool_id"]: contract for contract in catalog.list_tool_contracts()}
+
+        self.assertEqual(
+            contracts["xref.list_skills"]["response_envelope"],
+            "mcp_result_array",
+        )
+        self.assertEqual(
+            contracts["xref.get_startup_context"]["response_envelope"],
+            "direct_object",
+        )
+        self.assertEqual(
+            contracts["xref.get_document_by_xid"]["input_json_schema"]["properties"]["xid"]["type"],
+            "string",
+        )
+        self.assertNotIn(
+            "known_version",
+            contracts["xref.get_document_by_xid"]["input_json_schema"]["required"],
+        )
 
 
 if __name__ == "__main__":

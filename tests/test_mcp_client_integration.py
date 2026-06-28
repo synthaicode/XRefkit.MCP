@@ -62,10 +62,15 @@ class McpClientIntegrationTests(unittest.TestCase):
                             for instruction in startup["client_instructions"]
                         )
                     )
+                    obligation_ids = {
+                        obligation["id"] for obligation in startup["client_obligations"]
+                    }
+                    self.assertIn("startup.first_call", obligation_ids)
+                    self.assertIn("tools.materialize_from_mcp", obligation_ids)
                     uncertainty = next(
                         ref
                         for ref in startup["references"]
-                        if ref["path"] == "docs/016_uncertainty_protocol.md"
+                        if ref["xid"] == "8A666C1FD121"
                     )
                     self.assertIn("# Uncertainty Protocol", uncertainty["content"])
                     self.assertGreater(len(uncertainty["links"]), 0)
@@ -172,6 +177,12 @@ class McpClientIntegrationTests(unittest.TestCase):
                     self.assertEqual(manifest["execution_location"], "client")
                     self.assertEqual(manifest["version"], "0.1.0")
                     self.assertIs(manifest["server_executes_tools"], False)
+                    self.assertEqual(manifest["file_hash_algorithm"], "sha256")
+                    self.assertEqual(
+                        manifest["materialization"]["bundle_tool"],
+                        "get_client_tool_bundle",
+                    )
+                    self.assertIn("xrefkit-client-tools", manifest["required_package_ids"])
                     self.assertTrue(
                         any(
                             file["path"] == "tools/cs_scope_probe.py"
@@ -207,6 +218,20 @@ class McpClientIntegrationTests(unittest.TestCase):
                         },
                     )
                     self.assertIs(version_result.structuredContent["ok"], True)
+
+                    contracts_result = await session.call_tool("list_tool_contracts", {})
+                    contracts = {
+                        contract["tool_id"]: contract
+                        for contract in contracts_result.structuredContent["result"]
+                    }
+                    self.assertEqual(
+                        contracts["xref.list_skills"]["response_envelope"],
+                        "mcp_result_array",
+                    )
+                    self.assertEqual(
+                        contracts["xref.get_document_by_xid"]["input_json_schema"]["properties"]["xid"]["type"],
+                        "string",
+                    )
 
         anyio.run(scenario)
 
