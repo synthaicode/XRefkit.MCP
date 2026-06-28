@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 ExecutionLocation = Literal["server", "client"]
 SideEffects = Literal["none", "repo_write", "external_write", "unknown"]
+ResponseEnvelope = Literal["direct_object", "mcp_result_array"]
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class ToolContract:
     requires_workspace: bool
     required_when: str
     enforced_fields: tuple[str, ...] = ("execution_location", "side_effects")
+    response_envelope: ResponseEnvelope = "direct_object"
 
     def validate(self) -> None:
         if self.execution_location == "server" and self.side_effects != "none":
@@ -28,7 +30,11 @@ class ToolContract:
             )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["input_json_schema"] = _json_schema_object(self.input_schema)
+        data["output_json_schema"] = _json_schema_object(self.output_schema)
+        data["schema_format"] = "json_schema"
+        return data
 
 
 @dataclass(frozen=True)
@@ -179,6 +185,19 @@ class RuntimeRoleContract:
 
 
 @dataclass(frozen=True)
+class ClientObligation:
+    id: str
+    level: Literal["must", "should", "may"]
+    applies_when: str
+    statement: str
+    enforcement_owner: Literal["client", "server", "human"]
+    verification: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ClientToolFile:
     path: str
     kind: Literal["python", "support", "documentation"]
@@ -214,6 +233,12 @@ class ClientToolDistribution:
     execution_location: Literal["client"]
     server_executes_tools: bool
     install_layout: str
+    required_package_ids: list[str]
+    package_versions: dict[str, str]
+    file_hash_algorithm: str
+    version_check_tool: str
+    materialization: dict[str, Any]
+    update_policy: dict[str, Any]
     files: list[ClientToolManifestEntry]
     instructions: list[str]
 
@@ -224,6 +249,12 @@ class ClientToolDistribution:
             "execution_location": self.execution_location,
             "server_executes_tools": self.server_executes_tools,
             "install_layout": self.install_layout,
+            "required_package_ids": self.required_package_ids,
+            "package_versions": self.package_versions,
+            "file_hash_algorithm": self.file_hash_algorithm,
+            "version_check_tool": self.version_check_tool,
+            "materialization": self.materialization,
+            "update_policy": self.update_policy,
             "files": [file.to_dict() for file in self.files],
             "instructions": self.instructions,
         }
@@ -251,6 +282,7 @@ class StartupContext:
     repository_identity: dict[str, str]
     access_policy: dict[str, Any]
     client_instructions: list[str]
+    client_obligations: list[ClientObligation]
     link_resolution: dict[str, str]
     load_order: list[str]
     references: list[StartupReference]
@@ -265,6 +297,9 @@ class StartupContext:
             "repository_identity": self.repository_identity,
             "access_policy": self.access_policy,
             "client_instructions": self.client_instructions,
+            "client_obligations": [
+                obligation.to_dict() for obligation in self.client_obligations
+            ],
             "link_resolution": self.link_resolution,
             "load_order": self.load_order,
             "references": [reference.to_dict() for reference in self.references],
@@ -273,3 +308,40 @@ class StartupContext:
             "client_tool_distribution": self.client_tool_distribution.to_dict(),
             "missing": self.missing,
         }
+
+
+def _json_schema_object(schema: dict[str, Any]) -> dict[str, Any]:
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, descriptor in schema.items():
+        optional = isinstance(descriptor, str) and descriptor.endswith("?")
+        if not optional:
+            required.append(name)
+        properties[name] = _json_schema_for_descriptor(descriptor)
+    result: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
+    if required:
+        result["required"] = required
+    return result
+
+
+def _json_schema_for_descriptor(descriptor: Any) -> dict[str, Any]:
+    if isinstance(descriptor, dict):
+        return descriptor
+    if not isinstance(descriptor, str):
+        return {"description": str(descriptor)}
+    base = descriptor.removesuffix("?")
+    if base == "string":
+        return {"type": "string"}
+    if base == "integer":
+        return {"type": "integer"}
+    if base == "boolean":
+        return {"type": "boolean"}
+    if base == "object":
+        return {"type": "object"}
+    if base == "array":
+        return {"type": "array"}
+    return {"description": base}

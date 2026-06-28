@@ -24,6 +24,7 @@ from .repository import (
     stable_hash,
 )
 from .schemas import (
+    ClientObligation,
     ClientToolDistribution,
     ClientToolFile,
     ClientToolManifestEntry,
@@ -48,32 +49,32 @@ CLIENT_TOOL_PACKAGE_VERSION = "0.1.0"
 CACHE_MAX_VERSION_PAYLOAD_RATIO = 0.5
 STARTUP_REFERENCE_DEFINITIONS = [
     (
-        "agent/000_agent_entry.md",
+        "0B5C58B5E5B2",
         "base_control",
         "L0 operational contract for agents; this is the first repository-owned contract to show at initialization.",
     ),
     (
-        "docs/017_base_and_xref_layering.md",
+        "5A1C8E4D2F90",
         "base_control",
         "Defines the boundary between base AI control and XRefKit-specific routing.",
     ),
     (
-        "docs/011_startup_xref_routing.md",
+        "6C0B62D6366A",
         "xref_routing",
         "Shared startup policy for vendor-specific startup files and XRefKit routing.",
     ),
     (
-        "docs/016_uncertainty_protocol.md",
+        "8A666C1FD121",
         "base_control",
         "Required unknown and uncertainty behavior before risky execution.",
     ),
     (
-        "docs/053_context_direction_security_guard.md",
+        "A7F3C92D4E11",
         "base_control",
         "Base guard for preventing lower-layer context from rewriting higher-layer control.",
     ),
     (
-        "docs/015_shared_memory_operations.md",
+        "4A423E72D2ED",
         "base_control",
         "Traceability and shared-memory expectations for work continuity.",
     ),
@@ -269,7 +270,7 @@ class XRefCatalog:
             missing_tools = [
                 item.get("tool_id", "")
                 for item in skill.required_tools
-                if item.get("tool_id") not in available_tools
+                if item.get("tool_id") and item.get("tool_id") not in available_tools
             ]
             readiness = {"runnable": not missing_tools, "missing_tool_contracts": missing_tools}
             results.append(
@@ -365,22 +366,25 @@ class XRefCatalog:
         known_document_versions = known_document_versions or {}
         references: list[StartupReference] = []
         missing: list[dict[str, str]] = []
-        for rel_path, layer, reason in STARTUP_REFERENCE_DEFINITIONS:
-            path = self.repo_root / rel_path
-            if not path.exists():
-                missing.append({"path": rel_path, "reason": "startup reference file not found"})
+        managed_documents = _managed_markdown_by_xid(self.repo_root)
+        for expected_xid, layer, reason in STARTUP_REFERENCE_DEFINITIONS:
+            resolved = managed_documents.get(expected_xid)
+            if resolved is None:
+                missing.append(
+                    {
+                        "xid": expected_xid,
+                        "reason": "startup reference XID not found",
+                    }
+                )
                 continue
-            text = read_text(path)
-            xid = first_xid(text)
-            if not xid:
-                missing.append({"path": rel_path, "reason": "startup reference has no XID"})
-                xid = f"path:{rel_path}"
+            path, text = resolved
+            rel_path = relative_to_repo(path, self.repo_root)
             document = _xref_document(path, self.repo_root, text)
             cache_policy = _document_cache_policy(
                 document,
                 self.repository_fingerprint,
             )
-            known_version = known_document_versions.get(xid)
+            known_version = known_document_versions.get(expected_xid)
             not_modified = (
                 known_version == document.content_hash
                 and cache_policy["cache_recommended"]
@@ -396,7 +400,7 @@ class XRefCatalog:
             )
             references.append(
                 StartupReference(
-                    xid=xid,
+                    xid=expected_xid,
                     title=first_heading(text, Path(rel_path).stem),
                     path=rel_path,
                     layer=layer,  # type: ignore[arg-type]
@@ -460,6 +464,7 @@ class XRefCatalog:
                 "Keep client-side XID document cache entries only when cache_policy.cache_recommended is true.",
                 "Send cached content_hash values as known_version or known_document_versions; when cache_status is not_modified, use the locally hash-validated body instead of downloading it again.",
             ],
+            client_obligations=_client_obligations(),
             link_resolution={
                 "link_field": "links",
                 "xid_field": "xid",
@@ -530,6 +535,16 @@ def _managed_markdown_files(root: Path) -> list[Path]:
         if base.exists():
             files.extend(sorted(base.glob("**/*.md")))
     return files
+
+
+def _managed_markdown_by_xid(root: Path) -> dict[str, tuple[Path, str]]:
+    documents: dict[str, tuple[Path, str]] = {}
+    for path in _managed_markdown_files(root):
+        text = read_text(path)
+        xid = first_xid(text)
+        if xid:
+            documents.setdefault(xid, (path, text))
+    return documents
 
 
 def _xref_document(path: Path, root: Path, text: str) -> XRefDocument:
@@ -697,10 +712,12 @@ def _build_skills(root: Path) -> list[SkillCatalogEntry]:
                 capabilities=[_xref_to_id(item) for item in capability_refs],
                 intent=_derive_intent(meta),
                 target_artifacts=_derive_target_artifacts(meta),
-                applies_when=scalar_list(meta, "use_when"),
-                not_for=_split_constraints(str(meta.get("constraints") or "")),
+                applies_when=scalar_list(meta, "applies_when")
+                or scalar_list(meta, "use_when"),
+                not_for=scalar_list(meta, "not_for")
+                or _split_constraints(str(meta.get("constraints") or "")),
                 required_knowledge=[_knowledge_req(item) for item in knowledge_refs],
-                required_tools=[],
+                required_tools=[_required_tool(item) for item in scalar_list(meta, "required_tools")],
                 inputs=scalar_list(meta, "input"),
                 outputs=scalar_list(meta, "output"),
                 closure_contract=closure,
@@ -762,12 +779,34 @@ def _build_workflows(root: Path) -> list[WorkflowCatalogEntry]:
 
 
 def _client_tool_distribution(root: Path) -> ClientToolDistribution:
+    package_versions = {
+        CLIENT_TOOL_PACKAGE_ID: CLIENT_TOOL_PACKAGE_VERSION,
+        "xrefkit-client-tools": CLIENT_TOOL_PACKAGE_VERSION,
+    }
     return ClientToolDistribution(
         package_id=CLIENT_TOOL_PACKAGE_ID,
         version=CLIENT_TOOL_PACKAGE_VERSION,
         execution_location="client",
         server_executes_tools=False,
         install_layout="write each file to the same relative path under the client-side target repository root",
+        required_package_ids=sorted(package_versions),
+        package_versions=package_versions,
+        file_hash_algorithm="sha256",
+        version_check_tool="check_client_tool_versions",
+        materialization={
+            "source": "xrefkit_mcp",
+            "file_tool": "get_client_tool_file",
+            "bundle_tool": "get_client_tool_bundle",
+            "pip_package_tool": "get_client_tool_pip_package",
+            "run_location": "client",
+            "preserve_relative_paths": True,
+        },
+        update_policy={
+            "check_on_startup": True,
+            "install_when_missing": True,
+            "update_when_version_mismatch": True,
+            "server_executes_tools": False,
+        },
         files=[
             ClientToolManifestEntry(
                 path=file.path,
@@ -788,6 +827,51 @@ def _client_tool_distribution(root: Path) -> ClientToolDistribution:
             "Some tools call external programs such as git, dotnet, npm, or project-specific commands; satisfy those prerequisites on the client side before execution.",
         ],
     )
+
+
+def _client_obligations() -> list[ClientObligation]:
+    return [
+        ClientObligation(
+            id="startup.first_call",
+            level="must",
+            applies_when="xrefkit_mcp_configured",
+            statement="Call get_startup_context before task-specific routing.",
+            enforcement_owner="client",
+            verification="startup response is present before workflow, Skill, or knowledge routing",
+        ),
+        ClientObligation(
+            id="content.mcp_only",
+            level="must",
+            applies_when="access_policy.mode == mcp_only",
+            statement="Do not read XRefKit governance Markdown from a local filesystem checkout.",
+            enforcement_owner="client",
+            verification="XID-linked governance content is obtained through get_document_by_xid or get_skill",
+        ),
+        ClientObligation(
+            id="links.resolve_by_xid",
+            level="must",
+            applies_when="transferred content contains links entries",
+            statement="Resolve needed Markdown links by XID through get_document_by_xid.",
+            enforcement_owner="client",
+            verification="link resolver uses resolver_tool and resolver_argument from link metadata",
+        ),
+        ClientObligation(
+            id="tools.materialize_from_mcp",
+            level="must",
+            applies_when="client executes XRefKit-distributed tools",
+            statement="Fetch, materialize or install, and version-check client-side tools from XRefKit MCP before execution.",
+            enforcement_owner="client",
+            verification="check_client_tool_versions passes for the installed client-tool package versions",
+        ),
+        ClientObligation(
+            id="tools.client_side_execution",
+            level="must",
+            applies_when="client runs XRefKit-distributed tools",
+            statement="Run distributed tools only in the client execution environment; the MCP server does not execute them.",
+            enforcement_owner="client",
+            verification="tool execution occurs outside the XRefKit MCP server process",
+        ),
+    ]
 
 
 def _client_tool_files(root: Path) -> list[ClientToolFile]:
@@ -987,6 +1071,9 @@ def _missing_skill_fields(meta: dict[str, object], has_skill_doc: bool) -> list[
 
 
 def _derive_intent(meta: dict[str, object]) -> list[str]:
+    explicit = scalar_list(meta, "intent")
+    if explicit:
+        return explicit
     tags = scalar_list(meta, "tags")
     use_when = str(meta.get("use_when") or "")
     values = [tag for tag in tags if tag in {"review", "design", "routing", "quality"}]
@@ -998,6 +1085,9 @@ def _derive_intent(meta: dict[str, object]) -> list[str]:
 
 
 def _derive_target_artifacts(meta: dict[str, object]) -> list[str]:
+    explicit = scalar_list(meta, "target_artifacts")
+    if explicit:
+        return explicit
     haystack = " ".join(
         [str(meta.get("use_when") or ""), str(meta.get("input") or ""), *scalar_list(meta, "tags")]
     ).lower()
@@ -1030,6 +1120,19 @@ def _knowledge_req(ref: str) -> dict[str, object]:
         "version": 1,
         "required_when": "declared by Skill meta knowledge_refs",
         "detail_policy": "expand_on_demand",
+    }
+
+
+def _required_tool(name: str) -> dict[str, object]:
+    if name.startswith("xref."):
+        return {
+            "tool_id": name,
+            "required_when": "declared by Skill meta required_tools",
+        }
+    return {
+        "name": name,
+        "execution_location": "client",
+        "required_when": "declared by Skill meta required_tools",
     }
 
 
