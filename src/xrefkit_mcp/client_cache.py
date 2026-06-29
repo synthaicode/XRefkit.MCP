@@ -37,7 +37,7 @@ class XidDocumentCache:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             document = payload["document"]
-            version = payload["version"]
+            content_hash = payload["content_hash"]
             if payload["repository_fingerprint"] != self.repository_fingerprint:
                 raise ValueError("cached repository fingerprint does not match")
             if document["xid"] != xid:
@@ -47,9 +47,9 @@ class XidDocumentCache:
                 != self.repository_fingerprint
             ):
                 raise ValueError("document repository fingerprint does not match")
-            if document["content_hash"] != version:
-                raise ValueError("cached version does not match content_hash")
-            if stable_hash(document["content"]) != version:
+            if document["content_hash"] != content_hash:
+                raise ValueError("cached content_hash does not match document")
+            if stable_hash(document["content"]) != content_hash:
                 raise ValueError("cached content hash is invalid")
             return document
         except FileNotFoundError:
@@ -112,7 +112,7 @@ class XidDocumentCache:
             "schema_version": 1,
             "repository_fingerprint": self.repository_fingerprint,
             "xid": xid,
-            "version": version,
+            "content_hash": version,
             "document": document,
         }
         serialized = json.dumps(
@@ -241,6 +241,10 @@ class XidDocumentCache:
             raise DocumentCacheProtocolError(
                 "response repository fingerprint does not match cache namespace"
             )
+        if response.get("included_in_startup_contract_pack") is True:
+            result = dict(response)
+            result["client_cache_status"] = "startup_contract_pack"
+            return result
         if response.get("cache_status") == "not_modified":
             cached = self.load(xid)
             if cached is None:

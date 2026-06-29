@@ -230,14 +230,16 @@ That response contains:
 - `client_instructions`
 - `client_obligations`
 - `link_resolution`
-- base-control Markdown references, including full `content`
+- `startup_contract_pack`, the compressed model-facing startup contract
+- startup reference metadata with full source bodies omitted
 - workflow catalog entries
+- `workflow_protocol`
 - executor/checker runtime role contract
 - client-tool distribution metadata
 
 The client must not assume the XRefKit repository exists on the client machine.
-Use the transferred Markdown content and resolve any needed XID links through
-MCP.
+Use the startup contract pack as the model-facing startup text and resolve any
+needed source document bodies through MCP by XID.
 
 The startup response sets `access_policy.mode` to `mcp_only`. In this mode, the
 client must treat XRefKit MCP as the source of truth for governance content:
@@ -257,9 +259,9 @@ server over `streamable-http`.
 Link resolution rule:
 
 Startup references are selected by stable XID, not by repository-relative
-path. The `path` returned for each reference reports its current location and
-may change when the source repository is reorganized; clients should identify
-and cache startup documents by `xid`.
+path. Startup and XID document responses do not require clients to know current
+repository-relative paths; clients should identify and cache startup documents
+by `xid`.
 
 ```json
 {
@@ -276,12 +278,14 @@ Every transferred Markdown link entry also repeats the resolver fields:
 ```json
 {
   "xid": "5A1C8E4D2F90",
-  "target": "017_base_and_xref_layering.md#xid-5A1C8E4D2F90",
-  "path": "017_base_and_xref_layering.md",
   "resolver_tool": "get_document_by_xid",
   "resolver_argument": "xid"
 }
 ```
+
+Transferred Markdown content is normalized to XID-only references such as
+`#xid-5A1C8E4D2F90`; repository-relative Markdown paths are not part of the
+remote client contract.
 
 ## Client-Side XID Document Cache
 

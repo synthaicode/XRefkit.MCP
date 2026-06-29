@@ -15,6 +15,7 @@ from .repository import (
     first_xid,
     git_last_modified,
     markdown_xid_link_targets,
+    markdown_xid_only_text,
     markdown_xid_links,
     parse_meta_bullets,
     read_text,
@@ -40,6 +41,10 @@ from .schemas import (
     WorkflowCatalogEntry,
     XRefDocument,
 )
+from .startup_contract_pack import (
+    normalized_startup_contract_pack_body,
+    startup_contract_pack_hash,
+)
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_+#.-]+")
@@ -51,32 +56,26 @@ STARTUP_REFERENCE_DEFINITIONS = [
     (
         "0B5C58B5E5B2",
         "base_control",
-        "L0 operational contract for agents; this is the first repository-owned contract to show at initialization.",
     ),
     (
         "5A1C8E4D2F90",
         "base_control",
-        "Defines the boundary between base AI control and XRefKit-specific routing.",
     ),
     (
         "6C0B62D6366A",
         "xref_routing",
-        "Shared startup policy for vendor-specific startup files and XRefKit routing.",
     ),
     (
         "8A666C1FD121",
         "base_control",
-        "Required unknown and uncertainty behavior before risky execution.",
     ),
     (
         "A7F3C92D4E11",
         "base_control",
-        "Base guard for preventing lower-layer context from rewriting higher-layer control.",
     ),
     (
         "4A423E72D2ED",
         "base_control",
-        "Traceability and shared-memory expectations for work continuity.",
     ),
 ]
 STOP_TOKENS = {
@@ -368,7 +367,7 @@ class XRefCatalog:
         references: list[StartupReference] = []
         missing: list[dict[str, str]] = []
         managed_documents = _managed_markdown_by_xid(self.repo_root)
-        for expected_xid, layer, reason in STARTUP_REFERENCE_DEFINITIONS:
+        for expected_xid, layer in STARTUP_REFERENCE_DEFINITIONS:
             resolved = managed_documents.get(expected_xid)
             if resolved is None:
                 missing.append(
@@ -381,44 +380,29 @@ class XRefCatalog:
             path, text = resolved
             rel_path = relative_to_repo(path, self.repo_root)
             document = _xref_document(path, self.repo_root, text)
-            cache_policy = _document_cache_policy(
-                document,
-                self.repository_fingerprint,
-            )
             known_version = known_document_versions.get(expected_xid)
-            not_modified = (
-                known_version == document.content_hash
-                and cache_policy["cache_recommended"]
-            )
+            not_modified = known_version == document.content_hash
             cache_status = (
                 "not_modified"
                 if not_modified
-                else "bypassed"
-                if known_version == document.content_hash
                 else "modified"
                 if known_version
-                else "miss"
+                else "bypassed"
             )
             references.append(
                 StartupReference(
                     xid=expected_xid,
                     title=first_heading(text, Path(rel_path).stem),
-                    path=rel_path,
                     layer=layer,  # type: ignore[arg-type]
                     required_at_init=True,
-                    reason=reason,
                     summary=first_paragraph(text),
-                    content=None if not_modified else text,
+                    content=None,
                     links=markdown_xid_link_targets(text),
                     content_hash=document.content_hash,
-                    version=document.content_hash,
                     cache_status=cache_status,
-                    content_omitted=not_modified,
-                    cache_policy=(
-                        {"cache_recommended": True}
-                        if not_modified
-                        else cache_policy
-                    ),
+                    content_omitted=True,
+                    included_in_startup_contract_pack=True,
+                    cache_policy={"cache_recommended": False, "reason": "startup body represented by startup_contract_pack"},
                     repository_fingerprint=self.repository_fingerprint,
                 )
             )
@@ -478,8 +462,10 @@ class XRefCatalog:
                 "example_call": "get_document_by_xid({\"xid\": \"8A666C1FD121\"})",
             },
             load_order=[reference.xid for reference in references],
+            startup_contract_pack=_startup_contract_pack(references),
             references=references,
             workflows=_build_workflows(self.repo_root),
+            workflow_protocol=_workflow_protocol(),
             runtime_role_contract=_runtime_role_contract(),
             client_tool_distribution=_client_tool_distribution(self.repo_root),
             missing=missing,
@@ -554,14 +540,15 @@ def _xref_document(path: Path, root: Path, text: str) -> XRefDocument:
     xid = first_xid(text)
     if not xid:
         xid = f"path:{relative_to_repo(path, root)}"
+    content = markdown_xid_only_text(text)
     return XRefDocument(
         xid=xid,
         title=first_heading(text, path.stem),
         path=relative_to_repo(path, root),
         summary=first_paragraph(text),
-        content=text,
+        content=content,
         links=markdown_xid_link_targets(text),
-        content_hash=stable_hash(text),
+        content_hash=stable_hash(content),
     )
 
 
@@ -578,8 +565,6 @@ def _conditional_document_response(
         return {
             "xid": document.xid,
             "title": document.title,
-            "path": document.path,
-            "version": document.content_hash,
             "content_hash": document.content_hash,
             "repository_fingerprint": repository_fingerprint,
             "cache_status": "not_modified",
@@ -589,7 +574,6 @@ def _conditional_document_response(
     result = document.to_dict()
     result.update(
         {
-            "version": document.content_hash,
             "repository_fingerprint": repository_fingerprint,
             "cache_status": (
                 "bypassed"
@@ -618,8 +602,6 @@ def _document_cache_policy(
     not_modified_response = {
         "xid": document.xid,
         "title": document.title,
-        "path": document.path,
-        "version": document.content_hash,
         "content_hash": document.content_hash,
         "repository_fingerprint": repository_fingerprint,
         "cache_status": "not_modified",
@@ -673,7 +655,6 @@ def _skill_document_versions(
             {
                 "xid": document.xid,
                 "path": document.path,
-                "version": document.content_hash,
                 "content_hash": document.content_hash,
                 "repository_fingerprint": repository_fingerprint,
                 "cache_policy": _document_cache_policy(
@@ -683,6 +664,31 @@ def _skill_document_versions(
             }
         )
     return versions
+
+
+def _startup_contract_pack(references: list[StartupReference]) -> dict[str, object]:
+    source_xids = [reference.xid for reference in references]
+    expected_xids = [xid for xid, _layer in STARTUP_REFERENCE_DEFINITIONS]
+    if source_xids != expected_xids:
+        missing = [xid for xid in expected_xids if xid not in source_xids]
+        extra = [xid for xid in source_xids if xid not in expected_xids]
+        raise ValueError(
+            "startup contract pack source XIDs do not match required startup order: "
+            f"missing={missing}, extra={extra}"
+        )
+    source_hashes: dict[str, str] = {}
+    for reference in references:
+        if not reference.content_hash:
+            raise ValueError(f"startup reference missing content_hash: {reference.xid}")
+        source_hashes[reference.xid] = reference.content_hash
+    return {
+        "mode": "required_startup_contract_pack",
+        "pack_version": 1,
+        "source_xids": source_xids,
+        "source_hashes": source_hashes,
+        "pack_hash": startup_contract_pack_hash(),
+        "body": normalized_startup_contract_pack_body(),
+    }
 
 
 def _fresh_skill_entry(entry: SkillCatalogEntry, root: Path) -> SkillCatalogEntry:
@@ -894,10 +900,56 @@ def _client_obligations() -> list[ClientObligation]:
     ]
 
 
+def _workflow_protocol() -> dict[str, object]:
+    return {
+        "source": "xrefkit_mcp",
+        "routing": {
+            "selection_basis": [
+                "user intent",
+                "startup load_order",
+                "workflow catalog",
+                "Skill catalog",
+                "XID-linked evidence resolved through get_document_by_xid",
+            ],
+            "workflow_selection": "deterministic catalog metadata once selected; semantic selection may be performed by the client before execution",
+            "skill_selection": "route by catalog metadata, then fetch selected Skill through get_skill",
+        },
+        "phase_order": [
+            "startup",
+            "planning",
+            "execution",
+            "check",
+            "quality",
+            "closure",
+            "handoff",
+        ],
+        "role_ownership": {
+            "executor": "Skill-specific execution role",
+            "checker": "protocol-owned deterministic run-record verification",
+            "quality_reviewer": "protocol-owned quality review role separate from executor",
+            "handoff_owner": "protocol-owned handoff role",
+        },
+        "deterministic_checks": [
+            "load_order is returned by get_startup_context",
+            "XID links are resolved only through get_document_by_xid",
+            "check phase is advanced by deterministic fm skill verify semantics",
+            "content identity is content_hash; no duplicate document version field is emitted",
+        ],
+        "non_deterministic_decisions": [
+            "semantic workflow or Skill routing from user intent",
+            "quality judgment after deterministic checks pass",
+            "task-specific evidence sufficiency judgment",
+        ],
+    }
+
+
 def _context_injection_policy() -> dict[str, object]:
     return {
         "default_document_body_mode": "lazy",
-        "startup_reference_prompt_mode": "metadata_and_invariants_only",
+        "default_nonstartup_document_body_mode": "lazy",
+        "startup_reference_prompt_mode": "required_startup_contract_pack",
+        "startup_contract_pack_visible_by_default": True,
+        "startup_reference_body_visible_by_default": False,
         "materialize_does_not_imply_prompt_injection": True,
         "body_injection_unit": "xid_document",
         "body_visible_by_default": False,

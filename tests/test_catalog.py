@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import base64
+import hashlib
 import io
 import zipfile
 from pathlib import Path
@@ -328,6 +329,22 @@ if __name__ == "__main__":
             True,
         )
         self.assertEqual(
+            context["context_injection_policy"]["startup_reference_prompt_mode"],
+            "required_startup_contract_pack",
+        )
+        self.assertIs(
+            context["context_injection_policy"]["startup_contract_pack_visible_by_default"],
+            True,
+        )
+        self.assertIs(
+            context["context_injection_policy"]["startup_reference_body_visible_by_default"],
+            False,
+        )
+        self.assertEqual(
+            context["context_injection_policy"]["default_nonstartup_document_body_mode"],
+            "lazy",
+        )
+        self.assertEqual(
             context["session_context_deduplication"]["dedupe_key"],
             ["repository_fingerprint", "xid", "content_hash"],
         )
@@ -338,13 +355,50 @@ if __name__ == "__main__":
         self.assertIn("8A666C1FD121", xids)
         self.assertIn("0B5C58B5E5B2", xids)
         self.assertEqual(context["missing"], [])
+        pack = context["startup_contract_pack"]
+        self.assertEqual(pack["mode"], "required_startup_contract_pack")
+        self.assertEqual(pack["pack_version"], 1)
+        self.assertEqual(pack["source_xids"], xids)
+        self.assertEqual(
+            pack["source_hashes"],
+            {reference["xid"]: reference["content_hash"] for reference in context["references"]},
+        )
+        self.assertIn("# Startup Contract Pack v1", pack["body"])
+        self.assertIn(
+            'python -m fm skill run --meta <path-to-meta.md> --task "<task>" --json',
+            pack["body"],
+        )
+        self.assertEqual(
+            pack["pack_hash"],
+            hashlib.sha256(pack["body"].encode("utf-8")).hexdigest(),
+        )
+        self.assertIn("python -m fm skill verify --log <run-log>", pack["body"])
+        self.assertIn("python -m fm xref search \"<query>\"", pack["body"])
+        self.assertIn("Stop and escalate", pack["body"])
         self.assertEqual(context["references"][0]["layer"], "base_control")
-        self.assertIn("Required startup reference.", context["references"][0]["content"])
+        self.assertNotIn("reason", context["references"][0])
+        self.assertNotIn("path", context["references"][0])
+        self.assertIsNone(context["references"][0]["content"])
+        self.assertIs(context["references"][0]["content_omitted"], True)
+        self.assertIs(
+            context["references"][0]["included_in_startup_contract_pack"],
+            True,
+        )
         first_link = context["references"][0]["links"][0]
         self.assertEqual(first_link["xid"], "8A666C1FD121")
+        self.assertNotIn("path", first_link)
+        self.assertNotIn("target", first_link)
         self.assertEqual(first_link["resolver_tool"], "get_document_by_xid")
         self.assertEqual(first_link["resolver_argument"], "xid")
         self.assertEqual(context["workflows"][0]["flow_id"], "FLOW-SAMPLE")
+        self.assertEqual(
+            context["workflow_protocol"]["role_ownership"]["checker"],
+            "protocol-owned deterministic run-record verification",
+        )
+        self.assertIn(
+            "semantic workflow or Skill routing from user intent",
+            context["workflow_protocol"]["non_deterministic_decisions"],
+        )
         self.assertIn("checker", context["runtime_role_contract"]["roles"])
         self.assertIn(
             "check is deterministic progression verification via fm skill verify",
@@ -375,13 +429,17 @@ if __name__ == "__main__":
         cached = catalog.get_startup_context(versions)
 
         self.assertTrue(
-            all(reference["cache_status"] == "not_modified" for reference in cached["references"])
+            all(reference["included_in_startup_contract_pack"] for reference in cached["references"])
         )
         self.assertTrue(
             all(reference["content_omitted"] for reference in cached["references"])
         )
         self.assertTrue(
             all(reference["content"] is None for reference in cached["references"])
+        )
+        self.assertEqual(
+            cached["startup_contract_pack"]["source_hashes"],
+            {reference["xid"]: reference["content_hash"] for reference in cached["references"]},
         )
 
     def test_startup_context_resolves_reference_after_document_move(self) -> None:
@@ -396,10 +454,8 @@ if __name__ == "__main__":
             if reference["xid"] == "8A666C1FD121"
         )
 
-        self.assertEqual(
-            uncertainty["path"],
-            "docs/core/contracts/uncertainty_protocol.md",
-        )
+        self.assertNotIn("path", uncertainty)
+        self.assertEqual(uncertainty["xid"], "8A666C1FD121")
         self.assertEqual(context["missing"], [])
 
     def test_lists_workflows(self) -> None:
@@ -416,9 +472,11 @@ if __name__ == "__main__":
 
         document = catalog.get_document_by_xid("8A666C1FD121")
 
-        self.assertEqual(document["path"], "docs/core/contracts/016_uncertainty_protocol.md")
+        self.assertNotIn("path", document)
         self.assertIn("# Uncertainty Protocol", document["content"])
-        self.assertEqual(document["version"], document["content_hash"])
+        self.assertIn("xid-8A666C1FD121", document["content"])
+        self.assertNotIn(".md#xid-", document["content"])
+        self.assertNotIn("version", document)
         self.assertIs(document["cache_policy"]["cache_recommended"], True)
 
     def test_conditional_document_resolution_omits_unchanged_content(self) -> None:
@@ -433,8 +491,10 @@ if __name__ == "__main__":
 
         self.assertEqual(unchanged["cache_status"], "not_modified")
         self.assertIs(unchanged["content_omitted"], True)
+        self.assertNotIn("version", unchanged)
         self.assertNotIn("content", unchanged)
         self.assertEqual(stale["cache_status"], "modified")
+        self.assertNotIn("version", stale)
         self.assertIn("# Uncertainty Protocol", stale["content"])
 
     def test_cache_policy_bypasses_when_version_payload_is_not_smaller(self) -> None:

@@ -135,8 +135,6 @@ When the version matches and the cost gate permits caching:
 {
   "xid": "8A666C1FD121",
   "title": "Uncertainty Protocol",
-  "path": "docs/core/contracts/016_uncertainty_protocol.md",
-  "version": "<current-content-hash>",
   "content_hash": "<current-content-hash>",
   "cache_status": "not_modified",
   "content_omitted": true
@@ -147,8 +145,8 @@ The client must load the body from its local cache and validate that its
 SHA-256 hash still equals `content_hash`.
 
 When materializing `not_modified`, the client must use current metadata from the
-server response and reuse only the cached body. `title`, `path`, and other
-returned metadata must not be replaced by stale cached values.
+server response and reuse only the cached body. `title` and other returned
+metadata must not be replaced by stale cached values.
 
 ### Cache Miss Or Stale Version
 
@@ -317,7 +315,7 @@ Calls that omit `known_document_versions` retain the legacy full-content shape.
 Cache entries are JSON files named `<XID>.json` under the active repository
 fingerprint directory. Writes use a temporary file and an atomic replace. A
 malformed entry, repository fingerprint mismatch, mismatched XID, mismatched
-version, or content hash failure is treated as a cache miss and the entry is
+content hash, or body hash failure is treated as a cache miss and the entry is
 removed.
 
 The persisted envelope includes both namespace and document identity:
@@ -327,7 +325,7 @@ The persisted envelope includes both namespace and document identity:
   "schema_version": 1,
   "repository_fingerprint": "<repository-fingerprint>",
   "xid": "8A666C1FD121",
-  "version": "<content-hash>",
+  "content_hash": "<content-hash>",
   "document": {
     "repository_fingerprint": "<repository-fingerprint>",
     "xid": "8A666C1FD121",
