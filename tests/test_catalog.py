@@ -225,6 +225,31 @@ if __name__ == "__main__":
         self.assertEqual(skill["skill_links"][0]["xid"], "ABC123")
         self.assertEqual(skill["skill_links"][0]["resolver_tool"], "get_document_by_xid")
 
+    def test_get_skill_refreshes_skill_files_after_catalog_build(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+        meta_path = self.repo / "skills" / "sample" / "meta.md"
+        skill_path = self.repo / "skills" / "sample" / "SKILL.md"
+        meta_path.write_text(
+            meta_path.read_text(encoding="utf-8").replace(
+                "- summary: review sample source",
+                "- summary: refreshed summary",
+            ),
+            encoding="utf-8",
+        )
+        skill_path.write_text(
+            skill_path.read_text(encoding="utf-8").replace(
+                "# Skill: sample_review",
+                "# Skill: sample_review refreshed",
+            ),
+            encoding="utf-8",
+        )
+
+        skill = catalog.get_skill("sample_review")
+
+        self.assertEqual(skill["summary"], "refreshed summary")
+        self.assertIn("refreshed summary", skill["meta_content"])
+        self.assertIn("# Skill: sample_review refreshed", skill["skill_content"])
+
     def test_cache_aware_skill_returns_conditional_xid_documents(self) -> None:
         catalog = XRefCatalog.build(self.repo)
         first = catalog.get_skill("sample_review", {})
@@ -291,6 +316,25 @@ if __name__ == "__main__":
         self.assertTrue(
             any("MCP-only mode is active" in item for item in context["client_instructions"])
         )
+        self.assertTrue(
+            any("Materialize and apply startup references" in item for item in context["client_instructions"])
+        )
+        self.assertEqual(
+            context["context_injection_policy"]["default_document_body_mode"],
+            "lazy",
+        )
+        self.assertIs(
+            context["context_injection_policy"]["materialize_does_not_imply_prompt_injection"],
+            True,
+        )
+        self.assertEqual(
+            context["session_context_deduplication"]["dedupe_key"],
+            ["repository_fingerprint", "xid", "content_hash"],
+        )
+        self.assertEqual(
+            context["session_context_deduplication"]["active_model_context_cardinality"],
+            "at_most_one_body_per_dedupe_key",
+        )
         self.assertIn("8A666C1FD121", xids)
         self.assertIn("0B5C58B5E5B2", xids)
         self.assertEqual(context["missing"], [])
@@ -310,6 +354,7 @@ if __name__ == "__main__":
         self.assertIn("startup.first_call", obligation_ids)
         self.assertIn("content.mcp_only", obligation_ids)
         self.assertIn("tools.materialize_from_mcp", obligation_ids)
+        self.assertIn("context.no_duplicate_xid_body_per_session", obligation_ids)
         self.assertEqual(
             context["client_tool_distribution"]["materialization"]["bundle_tool"],
             "get_client_tool_bundle",

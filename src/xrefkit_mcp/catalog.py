@@ -180,13 +180,13 @@ class XRefCatalog:
         limit: int | None = None,
         include_content: bool = True,
     ) -> list[dict]:
-        results = [entry.to_dict() for entry in self.skills[: limit or None]]
+        fresh_entries = [
+            _fresh_skill_entry(entry, self.repo_root)
+            for entry in self.skills[: limit or None]
+        ]
+        results = [entry.to_dict() for entry in fresh_entries]
         if not include_content:
-            for entry, result in zip(
-                self.skills[: limit or None],
-                results,
-                strict=True,
-            ):
+            for entry, result in zip(fresh_entries, results, strict=True):
                 result["meta_content"] = None
                 result["skill_content"] = None
                 result["document_versions"] = _skill_document_versions(
@@ -202,6 +202,7 @@ class XRefCatalog:
         known_document_versions: dict[str, str] | None = None,
     ) -> dict:
         entry = self._skill_by_id(skill_id)
+        entry = _fresh_skill_entry(entry, self.repo_root)
         result = entry.to_dict()
         if known_document_versions is None:
             return result
@@ -452,9 +453,11 @@ class XRefCatalog:
                     "client_tool_distribution": "get_client_tool_manifest",
                 },
             },
+            context_injection_policy=_context_injection_policy(),
+            session_context_deduplication=_session_context_deduplication(),
             client_instructions=[
                 "A client may call get_repository_identity as a content-free cache namespace preflight; get_startup_context remains the first governance-content load.",
-                "Read and apply references in load_order before routing task-specific work.",
+                "Materialize and apply startup references in load_order before routing task-specific work. Applying a reference means enforcing its operational contract in the client runtime; it does not require injecting the full document body into the model prompt unless context_injection_policy requires it.",
                 "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
                 "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
                 "Do not assume referenced Markdown files exist on the client filesystem.",
@@ -682,54 +685,63 @@ def _skill_document_versions(
     return versions
 
 
+def _fresh_skill_entry(entry: SkillCatalogEntry, root: Path) -> SkillCatalogEntry:
+    meta_path = root / entry.meta_path
+    if not meta_path.exists():
+        return entry
+    return _build_skill_entry(root, meta_path)
+
+
+def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
+    text = read_text(meta_path)
+    meta = parse_meta_bullets(text)
+    skill_id = str(meta.get("skill_id") or meta_path.parent.name)
+    skill_doc_value = str(meta.get("skill_doc") or "./SKILL.md")
+    skill_doc = (meta_path.parent / skill_doc_value).resolve()
+    skill_text = read_text(skill_doc) if skill_doc.exists() else ""
+    missing = _missing_skill_fields(meta, skill_doc.exists())
+    knowledge_refs = scalar_list(meta, "knowledge_refs")
+    capability_refs = scalar_list(meta, "capability_refs")
+    closure = ClosureContract(
+        closure_conditions=scalar_list(meta, "closure")
+        or _section_bullets(skill_text, "Closure"),
+        exit_enum=["completed", "blocked", "needs_input"],
+        handoff_policy=str(meta.get("constraints") or "explicit handoff required"),
+        worklist_policy=str(
+            _nested_value(meta, "os_contract", "worklist_policy") or "required"
+        ),
+    )
+    return SkillCatalogEntry(
+        skill_id=skill_id,
+        title=first_heading(skill_text or text, skill_id),
+        summary=str(meta.get("summary") or first_paragraph(skill_text)),
+        maturity=str(meta.get("maturity") or "unknown"),
+        capabilities=[_xref_to_id(item) for item in capability_refs],
+        intent=_derive_intent(meta),
+        target_artifacts=_derive_target_artifacts(meta),
+        applies_when=scalar_list(meta, "applies_when")
+        or scalar_list(meta, "use_when"),
+        not_for=scalar_list(meta, "not_for")
+        or _split_constraints(str(meta.get("constraints") or "")),
+        required_knowledge=[_knowledge_req(item) for item in knowledge_refs],
+        required_tools=[_required_tool(item) for item in scalar_list(meta, "required_tools")],
+        inputs=scalar_list(meta, "input"),
+        outputs=scalar_list(meta, "output"),
+        closure_contract=closure,
+        meta_content=text,
+        meta_links=markdown_xid_link_targets(text),
+        skill_content=skill_text,
+        skill_links=markdown_xid_link_targets(skill_text),
+        path=relative_to_repo(skill_doc, root) if skill_doc.exists() else "",
+        meta_path=relative_to_repo(meta_path, root),
+        missing=missing,
+    )
+
+
 def _build_skills(root: Path) -> list[SkillCatalogEntry]:
     entries: list[SkillCatalogEntry] = []
     for meta_path in sorted((root / "skills").glob("**/meta.md")):
-        text = read_text(meta_path)
-        meta = parse_meta_bullets(text)
-        skill_id = str(meta.get("skill_id") or meta_path.parent.name)
-        skill_doc_value = str(meta.get("skill_doc") or "./SKILL.md")
-        skill_doc = (meta_path.parent / skill_doc_value).resolve()
-        skill_text = read_text(skill_doc) if skill_doc.exists() else ""
-        missing = _missing_skill_fields(meta, skill_doc.exists())
-        knowledge_refs = scalar_list(meta, "knowledge_refs")
-        capability_refs = scalar_list(meta, "capability_refs")
-        closure = ClosureContract(
-            closure_conditions=scalar_list(meta, "closure")
-            or _section_bullets(skill_text, "Closure"),
-            exit_enum=["completed", "blocked", "needs_input"],
-            handoff_policy=str(meta.get("constraints") or "explicit handoff required"),
-            worklist_policy=str(
-                _nested_value(meta, "os_contract", "worklist_policy") or "required"
-            ),
-        )
-        entries.append(
-            SkillCatalogEntry(
-                skill_id=skill_id,
-                title=first_heading(skill_text or text, skill_id),
-                summary=str(meta.get("summary") or first_paragraph(skill_text)),
-                maturity=str(meta.get("maturity") or "unknown"),
-                capabilities=[_xref_to_id(item) for item in capability_refs],
-                intent=_derive_intent(meta),
-                target_artifacts=_derive_target_artifacts(meta),
-                applies_when=scalar_list(meta, "applies_when")
-                or scalar_list(meta, "use_when"),
-                not_for=scalar_list(meta, "not_for")
-                or _split_constraints(str(meta.get("constraints") or "")),
-                required_knowledge=[_knowledge_req(item) for item in knowledge_refs],
-                required_tools=[_required_tool(item) for item in scalar_list(meta, "required_tools")],
-                inputs=scalar_list(meta, "input"),
-                outputs=scalar_list(meta, "output"),
-                closure_contract=closure,
-                meta_content=text,
-                meta_links=markdown_xid_link_targets(text),
-                skill_content=skill_text,
-                skill_links=markdown_xid_link_targets(skill_text),
-                path=relative_to_repo(skill_doc, root) if skill_doc.exists() else "",
-                meta_path=relative_to_repo(meta_path, root),
-                missing=missing,
-            )
-        )
+        entries.append(_build_skill_entry(root, meta_path))
     return entries
 
 
@@ -871,7 +883,70 @@ def _client_obligations() -> list[ClientObligation]:
             enforcement_owner="client",
             verification="tool execution occurs outside the XRefKit MCP server process",
         ),
+        ClientObligation(
+            id="context.no_duplicate_xid_body_per_session",
+            level="must",
+            applies_when="assembling model context",
+            statement="Within a single client session, the client MUST NOT inject more than one full document body for the same repository_fingerprint, xid, and content_hash into the active model context. If the same XID version is needed again, the client MUST reference the existing session context entry by XID and content_hash instead of repeating the body.",
+            enforcement_owner="client",
+            verification="Prompt assembly maintains a session-visible XID index and records injected_xids, reused_xids, content_hash values, visibility status, and reuse reasons for each model turn.",
+        ),
     ]
+
+
+def _context_injection_policy() -> dict[str, object]:
+    return {
+        "default_document_body_mode": "lazy",
+        "startup_reference_prompt_mode": "metadata_and_invariants_only",
+        "materialize_does_not_imply_prompt_injection": True,
+        "body_injection_unit": "xid_document",
+        "body_visible_by_default": False,
+        "metadata_visible_by_default": [
+            "xid",
+            "title",
+            "summary",
+            "layer",
+            "required_at_init",
+            "content_hash",
+            "links",
+            "cache_status",
+            "client_cache_status",
+        ],
+        "inject_body_when": [
+            "the active task explicitly requires that XID",
+            "the selected workflow or Skill declares that XID as required evidence",
+            "the model requests a linked XID that is needed to resolve a concrete uncertainty",
+            "a closure, safety, or verification check depends on the exact wording of that XID",
+            "the user explicitly asks to inspect, quote, edit, or verify that document",
+        ],
+        "do_not_inject_body_when": [
+            "the XID is only present as a related link",
+            "the summary is sufficient for routing",
+            "the document is cached only for future resolution",
+            "the document belongs to a lower-layer context that is not active for the current task",
+        ],
+    }
+
+
+def _session_context_deduplication() -> dict[str, object]:
+    return {
+        "scope": "single_client_session",
+        "dedupe_key": [
+            "repository_fingerprint",
+            "xid",
+            "content_hash",
+        ],
+        "active_model_context_cardinality": "at_most_one_body_per_dedupe_key",
+        "materialize_does_not_imply_duplicate_injection": True,
+        "on_repeated_xid_same_hash": "reference_existing_session_context_entry",
+        "on_repeated_xid_different_hash": "treat_as_version_change_and_replace_or_escalate",
+        "reinject_body_only_when": [
+            "the previous body is no longer visible in the active model context",
+            "the content_hash changed and the new version is selected",
+            "the client intentionally rebuilds the active context after compaction",
+        ],
+        "trace_required": True,
+    }
 
 
 def _client_tool_files(root: Path) -> list[ClientToolFile]:

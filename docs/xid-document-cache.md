@@ -135,7 +135,7 @@ When the version matches and the cost gate permits caching:
 {
   "xid": "8A666C1FD121",
   "title": "Uncertainty Protocol",
-  "path": "docs/016_uncertainty_protocol.md",
+  "path": "docs/core/contracts/016_uncertainty_protocol.md",
   "version": "<current-content-hash>",
   "content_hash": "<current-content-hash>",
   "cache_status": "not_modified",
