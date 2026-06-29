@@ -25,12 +25,10 @@ def cacheable_document(
     return {
         "xid": xid,
         "title": "Cached document",
-        "path": "docs/cached.md",
         "summary": "Cache test",
         "content": content,
         "links": [],
         "content_hash": version,
-        "version": version,
         "repository_fingerprint": repository_fingerprint,
         "cache_status": "miss",
         "content_omitted": False,
@@ -119,8 +117,6 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
             return {
                 "xid": xid,
                 "title": "Current server title",
-                "path": "docs/current-server-path.md",
-                "version": document["content_hash"],
                 "content_hash": document["content_hash"],
                 "repository_fingerprint": REPOSITORY_FINGERPRINT,
                 "cache_status": "not_modified",
@@ -132,7 +128,7 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(resolved["content"], "current content")
         self.assertEqual(resolved["title"], "Current server title")
-        self.assertEqual(resolved["path"], "docs/current-server-path.md")
+        self.assertNotIn("path", resolved)
         self.assertEqual(resolved["client_cache_status"], "hit")
         self.assertEqual(calls, [("ABC123", document["content_hash"])])
 
@@ -168,7 +164,6 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
                     references.append(
                         {
                             "xid": document["xid"],
-                            "version": document["content_hash"],
                             "content_hash": document["content_hash"],
                             "repository_fingerprint": REPOSITORY_FINGERPRINT,
                             "cache_status": "not_modified",
@@ -206,7 +201,6 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
             if len(calls) == 1:
                 return {
                     "xid": xid,
-                    "version": document["content_hash"],
                     "content_hash": document["content_hash"],
                     "repository_fingerprint": REPOSITORY_FINGERPRINT,
                     "cache_status": "not_modified",
@@ -220,7 +214,7 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved["content"], "recovered content")
         self.assertEqual(calls, [None, None])
 
-    def test_cache_file_contains_explicit_schema_and_version(self) -> None:
+    def test_cache_file_contains_explicit_schema_and_content_hash(self) -> None:
         document = cacheable_document("current content")
         self.cache.store(document)
 
@@ -237,7 +231,8 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
             payload["repository_fingerprint"],
             REPOSITORY_FINGERPRINT,
         )
-        self.assertEqual(payload["version"], document["content_hash"])
+        self.assertEqual(payload["content_hash"], document["content_hash"])
+        self.assertNotIn("version", payload)
 
 
 if __name__ == "__main__":

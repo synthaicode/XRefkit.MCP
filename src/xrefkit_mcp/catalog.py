@@ -15,6 +15,7 @@ from .repository import (
     first_xid,
     git_last_modified,
     markdown_xid_link_targets,
+    markdown_xid_only_text,
     markdown_xid_links,
     parse_meta_bullets,
     read_text,
@@ -40,6 +41,10 @@ from .schemas import (
     WorkflowCatalogEntry,
     XRefDocument,
 )
+from .startup_contract_pack import (
+    normalized_startup_contract_pack_body,
+    startup_contract_pack_hash,
+)
 
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_+#.-]+")
@@ -51,32 +56,26 @@ STARTUP_REFERENCE_DEFINITIONS = [
     (
         "0B5C58B5E5B2",
         "base_control",
-        "L0 operational contract for agents; this is the first repository-owned contract to show at initialization.",
     ),
     (
         "5A1C8E4D2F90",
         "base_control",
-        "Defines the boundary between base AI control and XRefKit-specific routing.",
     ),
     (
         "6C0B62D6366A",
         "xref_routing",
-        "Shared startup policy for vendor-specific startup files and XRefKit routing.",
     ),
     (
         "8A666C1FD121",
         "base_control",
-        "Required unknown and uncertainty behavior before risky execution.",
     ),
     (
         "A7F3C92D4E11",
         "base_control",
-        "Base guard for preventing lower-layer context from rewriting higher-layer control.",
     ),
     (
         "4A423E72D2ED",
         "base_control",
-        "Traceability and shared-memory expectations for work continuity.",
     ),
 ]
 STOP_TOKENS = {
@@ -180,13 +179,13 @@ class XRefCatalog:
         limit: int | None = None,
         include_content: bool = True,
     ) -> list[dict]:
-        results = [entry.to_dict() for entry in self.skills[: limit or None]]
+        fresh_entries = [
+            _fresh_skill_entry(entry, self.repo_root)
+            for entry in self.skills[: limit or None]
+        ]
+        results = [entry.to_dict() for entry in fresh_entries]
         if not include_content:
-            for entry, result in zip(
-                self.skills[: limit or None],
-                results,
-                strict=True,
-            ):
+            for entry, result in zip(fresh_entries, results, strict=True):
                 result["meta_content"] = None
                 result["skill_content"] = None
                 result["document_versions"] = _skill_document_versions(
@@ -202,6 +201,7 @@ class XRefCatalog:
         known_document_versions: dict[str, str] | None = None,
     ) -> dict:
         entry = self._skill_by_id(skill_id)
+        entry = _fresh_skill_entry(entry, self.repo_root)
         result = entry.to_dict()
         if known_document_versions is None:
             return result
@@ -367,7 +367,7 @@ class XRefCatalog:
         references: list[StartupReference] = []
         missing: list[dict[str, str]] = []
         managed_documents = _managed_markdown_by_xid(self.repo_root)
-        for expected_xid, layer, reason in STARTUP_REFERENCE_DEFINITIONS:
+        for expected_xid, layer in STARTUP_REFERENCE_DEFINITIONS:
             resolved = managed_documents.get(expected_xid)
             if resolved is None:
                 missing.append(
@@ -380,44 +380,29 @@ class XRefCatalog:
             path, text = resolved
             rel_path = relative_to_repo(path, self.repo_root)
             document = _xref_document(path, self.repo_root, text)
-            cache_policy = _document_cache_policy(
-                document,
-                self.repository_fingerprint,
-            )
             known_version = known_document_versions.get(expected_xid)
-            not_modified = (
-                known_version == document.content_hash
-                and cache_policy["cache_recommended"]
-            )
+            not_modified = known_version == document.content_hash
             cache_status = (
                 "not_modified"
                 if not_modified
-                else "bypassed"
-                if known_version == document.content_hash
                 else "modified"
                 if known_version
-                else "miss"
+                else "bypassed"
             )
             references.append(
                 StartupReference(
                     xid=expected_xid,
                     title=first_heading(text, Path(rel_path).stem),
-                    path=rel_path,
                     layer=layer,  # type: ignore[arg-type]
                     required_at_init=True,
-                    reason=reason,
                     summary=first_paragraph(text),
-                    content=None if not_modified else text,
+                    content=None,
                     links=markdown_xid_link_targets(text),
                     content_hash=document.content_hash,
-                    version=document.content_hash,
                     cache_status=cache_status,
-                    content_omitted=not_modified,
-                    cache_policy=(
-                        {"cache_recommended": True}
-                        if not_modified
-                        else cache_policy
-                    ),
+                    content_omitted=True,
+                    included_in_startup_contract_pack=True,
+                    cache_policy={"cache_recommended": False, "reason": "startup body represented by startup_contract_pack"},
                     repository_fingerprint=self.repository_fingerprint,
                 )
             )
@@ -452,9 +437,11 @@ class XRefCatalog:
                     "client_tool_distribution": "get_client_tool_manifest",
                 },
             },
+            context_injection_policy=_context_injection_policy(),
+            session_context_deduplication=_session_context_deduplication(),
             client_instructions=[
                 "A client may call get_repository_identity as a content-free cache namespace preflight; get_startup_context remains the first governance-content load.",
-                "Read and apply references in load_order before routing task-specific work.",
+                "Materialize and apply startup references in load_order before routing task-specific work. Applying a reference means enforcing its operational contract in the client runtime; it does not require injecting the full document body into the model prompt unless context_injection_policy requires it.",
                 "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
                 "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
                 "Do not assume referenced Markdown files exist on the client filesystem.",
@@ -475,8 +462,10 @@ class XRefCatalog:
                 "example_call": "get_document_by_xid({\"xid\": \"8A666C1FD121\"})",
             },
             load_order=[reference.xid for reference in references],
+            startup_contract_pack=_startup_contract_pack(references),
             references=references,
             workflows=_build_workflows(self.repo_root),
+            workflow_protocol=_workflow_protocol(),
             runtime_role_contract=_runtime_role_contract(),
             client_tool_distribution=_client_tool_distribution(self.repo_root),
             missing=missing,
@@ -551,14 +540,15 @@ def _xref_document(path: Path, root: Path, text: str) -> XRefDocument:
     xid = first_xid(text)
     if not xid:
         xid = f"path:{relative_to_repo(path, root)}"
+    content = markdown_xid_only_text(text)
     return XRefDocument(
         xid=xid,
         title=first_heading(text, path.stem),
         path=relative_to_repo(path, root),
         summary=first_paragraph(text),
-        content=text,
+        content=content,
         links=markdown_xid_link_targets(text),
-        content_hash=stable_hash(text),
+        content_hash=stable_hash(content),
     )
 
 
@@ -575,8 +565,6 @@ def _conditional_document_response(
         return {
             "xid": document.xid,
             "title": document.title,
-            "path": document.path,
-            "version": document.content_hash,
             "content_hash": document.content_hash,
             "repository_fingerprint": repository_fingerprint,
             "cache_status": "not_modified",
@@ -586,7 +574,6 @@ def _conditional_document_response(
     result = document.to_dict()
     result.update(
         {
-            "version": document.content_hash,
             "repository_fingerprint": repository_fingerprint,
             "cache_status": (
                 "bypassed"
@@ -615,8 +602,6 @@ def _document_cache_policy(
     not_modified_response = {
         "xid": document.xid,
         "title": document.title,
-        "path": document.path,
-        "version": document.content_hash,
         "content_hash": document.content_hash,
         "repository_fingerprint": repository_fingerprint,
         "cache_status": "not_modified",
@@ -670,7 +655,6 @@ def _skill_document_versions(
             {
                 "xid": document.xid,
                 "path": document.path,
-                "version": document.content_hash,
                 "content_hash": document.content_hash,
                 "repository_fingerprint": repository_fingerprint,
                 "cache_policy": _document_cache_policy(
@@ -682,54 +666,88 @@ def _skill_document_versions(
     return versions
 
 
+def _startup_contract_pack(references: list[StartupReference]) -> dict[str, object]:
+    source_xids = [reference.xid for reference in references]
+    expected_xids = [xid for xid, _layer in STARTUP_REFERENCE_DEFINITIONS]
+    if source_xids != expected_xids:
+        missing = [xid for xid in expected_xids if xid not in source_xids]
+        extra = [xid for xid in source_xids if xid not in expected_xids]
+        raise ValueError(
+            "startup contract pack source XIDs do not match required startup order: "
+            f"missing={missing}, extra={extra}"
+        )
+    source_hashes: dict[str, str] = {}
+    for reference in references:
+        if not reference.content_hash:
+            raise ValueError(f"startup reference missing content_hash: {reference.xid}")
+        source_hashes[reference.xid] = reference.content_hash
+    return {
+        "mode": "required_startup_contract_pack",
+        "pack_version": 1,
+        "source_xids": source_xids,
+        "source_hashes": source_hashes,
+        "pack_hash": startup_contract_pack_hash(),
+        "body": normalized_startup_contract_pack_body(),
+    }
+
+
+def _fresh_skill_entry(entry: SkillCatalogEntry, root: Path) -> SkillCatalogEntry:
+    meta_path = root / entry.meta_path
+    if not meta_path.exists():
+        return entry
+    return _build_skill_entry(root, meta_path)
+
+
+def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
+    text = read_text(meta_path)
+    meta = parse_meta_bullets(text)
+    skill_id = str(meta.get("skill_id") or meta_path.parent.name)
+    skill_doc_value = str(meta.get("skill_doc") or "./SKILL.md")
+    skill_doc = (meta_path.parent / skill_doc_value).resolve()
+    skill_text = read_text(skill_doc) if skill_doc.exists() else ""
+    missing = _missing_skill_fields(meta, skill_doc.exists())
+    knowledge_refs = scalar_list(meta, "knowledge_refs")
+    capability_refs = scalar_list(meta, "capability_refs")
+    closure = ClosureContract(
+        closure_conditions=scalar_list(meta, "closure")
+        or _section_bullets(skill_text, "Closure"),
+        exit_enum=["completed", "blocked", "needs_input"],
+        handoff_policy=str(meta.get("constraints") or "explicit handoff required"),
+        worklist_policy=str(
+            _nested_value(meta, "os_contract", "worklist_policy") or "required"
+        ),
+    )
+    return SkillCatalogEntry(
+        skill_id=skill_id,
+        title=first_heading(skill_text or text, skill_id),
+        summary=str(meta.get("summary") or first_paragraph(skill_text)),
+        maturity=str(meta.get("maturity") or "unknown"),
+        capabilities=[_xref_to_id(item) for item in capability_refs],
+        intent=_derive_intent(meta),
+        target_artifacts=_derive_target_artifacts(meta),
+        applies_when=scalar_list(meta, "applies_when")
+        or scalar_list(meta, "use_when"),
+        not_for=scalar_list(meta, "not_for")
+        or _split_constraints(str(meta.get("constraints") or "")),
+        required_knowledge=[_knowledge_req(item) for item in knowledge_refs],
+        required_tools=[_required_tool(item) for item in scalar_list(meta, "required_tools")],
+        inputs=scalar_list(meta, "input"),
+        outputs=scalar_list(meta, "output"),
+        closure_contract=closure,
+        meta_content=text,
+        meta_links=markdown_xid_link_targets(text),
+        skill_content=skill_text,
+        skill_links=markdown_xid_link_targets(skill_text),
+        path=relative_to_repo(skill_doc, root) if skill_doc.exists() else "",
+        meta_path=relative_to_repo(meta_path, root),
+        missing=missing,
+    )
+
+
 def _build_skills(root: Path) -> list[SkillCatalogEntry]:
     entries: list[SkillCatalogEntry] = []
     for meta_path in sorted((root / "skills").glob("**/meta.md")):
-        text = read_text(meta_path)
-        meta = parse_meta_bullets(text)
-        skill_id = str(meta.get("skill_id") or meta_path.parent.name)
-        skill_doc_value = str(meta.get("skill_doc") or "./SKILL.md")
-        skill_doc = (meta_path.parent / skill_doc_value).resolve()
-        skill_text = read_text(skill_doc) if skill_doc.exists() else ""
-        missing = _missing_skill_fields(meta, skill_doc.exists())
-        knowledge_refs = scalar_list(meta, "knowledge_refs")
-        capability_refs = scalar_list(meta, "capability_refs")
-        closure = ClosureContract(
-            closure_conditions=scalar_list(meta, "closure")
-            or _section_bullets(skill_text, "Closure"),
-            exit_enum=["completed", "blocked", "needs_input"],
-            handoff_policy=str(meta.get("constraints") or "explicit handoff required"),
-            worklist_policy=str(
-                _nested_value(meta, "os_contract", "worklist_policy") or "required"
-            ),
-        )
-        entries.append(
-            SkillCatalogEntry(
-                skill_id=skill_id,
-                title=first_heading(skill_text or text, skill_id),
-                summary=str(meta.get("summary") or first_paragraph(skill_text)),
-                maturity=str(meta.get("maturity") or "unknown"),
-                capabilities=[_xref_to_id(item) for item in capability_refs],
-                intent=_derive_intent(meta),
-                target_artifacts=_derive_target_artifacts(meta),
-                applies_when=scalar_list(meta, "applies_when")
-                or scalar_list(meta, "use_when"),
-                not_for=scalar_list(meta, "not_for")
-                or _split_constraints(str(meta.get("constraints") or "")),
-                required_knowledge=[_knowledge_req(item) for item in knowledge_refs],
-                required_tools=[_required_tool(item) for item in scalar_list(meta, "required_tools")],
-                inputs=scalar_list(meta, "input"),
-                outputs=scalar_list(meta, "output"),
-                closure_contract=closure,
-                meta_content=text,
-                meta_links=markdown_xid_link_targets(text),
-                skill_content=skill_text,
-                skill_links=markdown_xid_link_targets(skill_text),
-                path=relative_to_repo(skill_doc, root) if skill_doc.exists() else "",
-                meta_path=relative_to_repo(meta_path, root),
-                missing=missing,
-            )
-        )
+        entries.append(_build_skill_entry(root, meta_path))
     return entries
 
 
@@ -871,7 +889,116 @@ def _client_obligations() -> list[ClientObligation]:
             enforcement_owner="client",
             verification="tool execution occurs outside the XRefKit MCP server process",
         ),
+        ClientObligation(
+            id="context.no_duplicate_xid_body_per_session",
+            level="must",
+            applies_when="assembling model context",
+            statement="Within a single client session, the client MUST NOT inject more than one full document body for the same repository_fingerprint, xid, and content_hash into the active model context. If the same XID version is needed again, the client MUST reference the existing session context entry by XID and content_hash instead of repeating the body.",
+            enforcement_owner="client",
+            verification="Prompt assembly maintains a session-visible XID index and records injected_xids, reused_xids, content_hash values, visibility status, and reuse reasons for each model turn.",
+        ),
     ]
+
+
+def _workflow_protocol() -> dict[str, object]:
+    return {
+        "source": "xrefkit_mcp",
+        "routing": {
+            "selection_basis": [
+                "user intent",
+                "startup load_order",
+                "workflow catalog",
+                "Skill catalog",
+                "XID-linked evidence resolved through get_document_by_xid",
+            ],
+            "workflow_selection": "deterministic catalog metadata once selected; semantic selection may be performed by the client before execution",
+            "skill_selection": "route by catalog metadata, then fetch selected Skill through get_skill",
+        },
+        "phase_order": [
+            "startup",
+            "planning",
+            "execution",
+            "check",
+            "quality",
+            "closure",
+            "handoff",
+        ],
+        "role_ownership": {
+            "executor": "Skill-specific execution role",
+            "checker": "protocol-owned deterministic run-record verification",
+            "quality_reviewer": "protocol-owned quality review role separate from executor",
+            "handoff_owner": "protocol-owned handoff role",
+        },
+        "deterministic_checks": [
+            "load_order is returned by get_startup_context",
+            "XID links are resolved only through get_document_by_xid",
+            "check phase is advanced by deterministic fm skill verify semantics",
+            "content identity is content_hash; no duplicate document version field is emitted",
+        ],
+        "non_deterministic_decisions": [
+            "semantic workflow or Skill routing from user intent",
+            "quality judgment after deterministic checks pass",
+            "task-specific evidence sufficiency judgment",
+        ],
+    }
+
+
+def _context_injection_policy() -> dict[str, object]:
+    return {
+        "default_document_body_mode": "lazy",
+        "default_nonstartup_document_body_mode": "lazy",
+        "startup_reference_prompt_mode": "required_startup_contract_pack",
+        "startup_contract_pack_visible_by_default": True,
+        "startup_reference_body_visible_by_default": False,
+        "materialize_does_not_imply_prompt_injection": True,
+        "body_injection_unit": "xid_document",
+        "body_visible_by_default": False,
+        "metadata_visible_by_default": [
+            "xid",
+            "title",
+            "summary",
+            "layer",
+            "required_at_init",
+            "content_hash",
+            "links",
+            "cache_status",
+            "client_cache_status",
+        ],
+        "inject_body_when": [
+            "the active task explicitly requires that XID",
+            "the selected workflow or Skill declares that XID as required evidence",
+            "the model requests a linked XID that is needed to resolve a concrete uncertainty",
+            "a closure, safety, or verification check depends on the exact wording of that XID",
+            "the user explicitly asks to inspect, quote, edit, or verify that document",
+        ],
+        "do_not_inject_body_when": [
+            "the XID is only present as a related link",
+            "the summary is sufficient for routing",
+            "the document is cached only for future resolution",
+            "the document belongs to a lower-layer context that is not active for the current task",
+        ],
+    }
+
+
+def _session_context_deduplication() -> dict[str, object]:
+    return {
+        "scope": "single_client_session",
+        "dedupe_key": [
+            "repository_fingerprint",
+            "xid",
+            "content_hash",
+        ],
+        "active_model_context_cardinality": "at_most_one_body_per_dedupe_key",
+        "materialize_does_not_imply_duplicate_injection": True,
+        "on_repeated_xid_same_hash": "reference_existing_session_context_entry",
+        "on_repeated_xid_different_hash": "treat_as_version_change_and_replace_or_escalate",
+        "reinject_body_only_when": [
+            "the previous body is no longer visible in the active model context",
+            "the content_hash changed and the new version is selected",
+            "the client intentionally rebuilds the active context after compaction",
+        ],
+        "trace_required": True,
+    }
 
 
 def _client_tool_files(root: Path) -> list[ClientToolFile]:

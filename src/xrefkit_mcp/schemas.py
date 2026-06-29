@@ -55,7 +55,9 @@ class KnowledgeCatalogEntry:
     missing: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("path", None)
+        return data
 
 
 @dataclass(frozen=True)
@@ -118,17 +120,15 @@ class SkillRankResult:
 class StartupReference:
     xid: str
     title: str
-    path: str
     layer: Literal["base_control", "xref_routing"]
     required_at_init: bool
-    reason: str
     summary: str
     content: str | None
     links: list[dict[str, str]]
     content_hash: str | None = None
-    version: str | None = None
     cache_status: Literal["miss", "modified", "not_modified", "bypassed"] = "miss"
     content_omitted: bool = False
+    included_in_startup_contract_pack: bool = False
     cache_policy: dict[str, Any] = field(default_factory=dict)
     repository_fingerprint: str | None = None
 
@@ -147,7 +147,9 @@ class XRefDocument:
     content_hash: str
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("path", None)
+        return data
 
 
 @dataclass(frozen=True)
@@ -168,7 +170,9 @@ class WorkflowCatalogEntry:
     missing: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("path", None)
+        return data
 
 
 @dataclass(frozen=True)
@@ -281,12 +285,16 @@ class StartupContext:
     catalog_version: str
     repository_identity: dict[str, str]
     access_policy: dict[str, Any]
+    context_injection_policy: dict[str, Any]
+    session_context_deduplication: dict[str, Any]
     client_instructions: list[str]
     client_obligations: list[ClientObligation]
     link_resolution: dict[str, str]
     load_order: list[str]
+    startup_contract_pack: dict[str, Any]
     references: list[StartupReference]
     workflows: list[WorkflowCatalogEntry]
+    workflow_protocol: dict[str, Any]
     runtime_role_contract: RuntimeRoleContract
     client_tool_distribution: ClientToolDistribution
     missing: list[dict[str, str]]
@@ -296,14 +304,18 @@ class StartupContext:
             "catalog_version": self.catalog_version,
             "repository_identity": self.repository_identity,
             "access_policy": self.access_policy,
+            "context_injection_policy": self.context_injection_policy,
+            "session_context_deduplication": self.session_context_deduplication,
             "client_instructions": self.client_instructions,
             "client_obligations": [
                 obligation.to_dict() for obligation in self.client_obligations
             ],
             "link_resolution": self.link_resolution,
             "load_order": self.load_order,
+            "startup_contract_pack": self.startup_contract_pack,
             "references": [reference.to_dict() for reference in self.references],
             "workflows": [workflow.to_dict() for workflow in self.workflows],
+            "workflow_protocol": self.workflow_protocol,
             "runtime_role_contract": self.runtime_role_contract.to_dict(),
             "client_tool_distribution": self.client_tool_distribution.to_dict(),
             "missing": self.missing,

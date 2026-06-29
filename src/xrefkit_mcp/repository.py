@@ -9,6 +9,7 @@ from pathlib import Path
 XID_RE = re.compile(r"xid[:=-]\s*([A-Za-z0-9]+)|#xid-([A-Za-z0-9]+)")
 HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 MD_LINK_RE = re.compile(r"\]\((?P<target>[^)]+#xid-(?P<xid>[A-Za-z0-9]+))\)")
+XID_TARGET_RE = re.compile(r"(?P<path>[A-Za-z0-9_.\-/]+\.md)#xid-(?P<xid>[A-Za-z0-9]+)")
 
 
 def read_text(path: Path) -> str:
@@ -61,25 +62,24 @@ def markdown_xid_links(text: str) -> list[str]:
 
 def markdown_xid_link_targets(text: str) -> list[dict[str, str]]:
     links: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     for match in MD_LINK_RE.finditer(text):
-        target = match.group("target")
         xid = match.group("xid")
-        key = (target, xid)
-        if key in seen:
+        if xid in seen:
             continue
-        seen.add(key)
-        path = target.split("#xid-", 1)[0]
+        seen.add(xid)
         links.append(
             {
                 "xid": xid,
-                "target": target,
-                "path": path,
                 "resolver_tool": "get_document_by_xid",
                 "resolver_argument": "xid",
             }
         )
     return links
+
+
+def markdown_xid_only_text(text: str) -> str:
+    return XID_TARGET_RE.sub(lambda match: f"#xid-{match.group('xid')}", text)
 
 
 def relative_to_repo(path: Path, repo_root: Path) -> str:

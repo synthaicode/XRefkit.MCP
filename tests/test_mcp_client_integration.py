@@ -72,7 +72,17 @@ class McpClientIntegrationTests(unittest.TestCase):
                         for ref in startup["references"]
                         if ref["xid"] == "8A666C1FD121"
                     )
-                    self.assertIn("# Uncertainty Protocol", uncertainty["content"])
+                    self.assertIsNone(uncertainty["content"])
+                    self.assertIs(uncertainty["content_omitted"], True)
+                    self.assertIs(uncertainty["included_in_startup_contract_pack"], True)
+                    self.assertIn(
+                        "Startup Contract Pack v1",
+                        startup["startup_contract_pack"]["body"],
+                    )
+                    self.assertEqual(
+                        startup["startup_contract_pack"]["source_hashes"][uncertainty["xid"]],
+                        uncertainty["content_hash"],
+                    )
                     self.assertGreater(len(uncertainty["links"]), 0)
                     self.assertEqual(
                         uncertainty["links"][0]["resolver_tool"],
@@ -90,9 +100,9 @@ class McpClientIntegrationTests(unittest.TestCase):
                     cached_startup = cached_startup_result.structuredContent
                     self.assertTrue(
                         all(
-                            ref["cache_status"] == "not_modified"
-                            and ref["content_omitted"]
+                            ref["content_omitted"]
                             and ref["content"] is None
+                            and ref["included_in_startup_contract_pack"]
                             for ref in cached_startup["references"]
                         )
                     )
