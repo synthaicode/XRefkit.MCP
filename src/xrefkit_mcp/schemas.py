@@ -293,10 +293,7 @@ class StartupContext:
     load_order: list[str]
     startup_contract_pack: dict[str, Any]
     references: list[StartupReference]
-    workflows: list[WorkflowCatalogEntry]
-    workflow_protocol: dict[str, Any]
-    runtime_role_contract: RuntimeRoleContract
-    client_tool_distribution: ClientToolDistribution
+    semantic_routing_references: list[dict[str, Any]]
     missing: list[dict[str, str]]
 
     def to_dict(self) -> dict[str, Any]:
@@ -314,10 +311,7 @@ class StartupContext:
             "load_order": self.load_order,
             "startup_contract_pack": self.startup_contract_pack,
             "references": [reference.to_dict() for reference in self.references],
-            "workflows": [workflow.to_dict() for workflow in self.workflows],
-            "workflow_protocol": self.workflow_protocol,
-            "runtime_role_contract": self.runtime_role_contract.to_dict(),
-            "client_tool_distribution": self.client_tool_distribution.to_dict(),
+            "semantic_routing_references": self.semantic_routing_references,
             "missing": self.missing,
         }
 

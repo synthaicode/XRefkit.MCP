@@ -137,6 +137,12 @@ class McpClientIntegrationTests(unittest.TestCase):
                     self.assertEqual(skill["skill_id"], "csharp_review")
                     self.assertIn("# Skill: csharp_review", skill["skill_content"])
                     self.assertGreater(len(skill["skill_links"]), 0)
+                    self.assertIn("client_tool_download", skill)
+                    self.assertIs(skill["client_tool_download"]["do_not_download_at_startup"], True)
+                    self.assertEqual(
+                        skill["client_tool_download"]["manifest_tool"],
+                        "get_client_tool_manifest",
+                    )
                     self.assertEqual(
                         skill["skill_links"][0]["resolver_tool"],
                         "get_document_by_xid",
