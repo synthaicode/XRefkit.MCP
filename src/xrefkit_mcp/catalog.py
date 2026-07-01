@@ -800,6 +800,12 @@ def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
         skill_links=markdown_xid_link_targets(skill_text),
         path=relative_to_repo(skill_doc, root) if skill_doc.exists() else "",
         meta_path=relative_to_repo(meta_path, root),
+        context_size=_skill_context_size(
+            text,
+            skill_text,
+            scalar_list(meta, "output"),
+            closure,
+        ),
         missing=missing,
     )
 
@@ -1232,6 +1238,56 @@ def _client_tool_download_policy(entry: SkillCatalogEntry) -> dict[str, object]:
         "file_tool": "get_client_tool_file",
         "bundle_tool": "get_client_tool_bundle",
         "version_check_tool": "check_client_tool_versions",
+    }
+
+
+def _skill_context_size(
+    meta_content: str,
+    skill_content: str,
+    outputs: list[str],
+    closure: ClosureContract,
+) -> dict[str, object]:
+    meta_size = _text_size(meta_content)
+    skill_size = _text_size(skill_content)
+    read_size = _sum_text_sizes([meta_size, skill_size])
+    write_contract_size = _text_size(
+        "\n".join(
+            [
+                *outputs,
+                *closure.closure_conditions,
+                *closure.exit_enum,
+                closure.handoff_policy,
+                closure.worklist_policy,
+            ]
+        )
+    )
+    return {
+        "unit": "estimated_tokens",
+        "estimator": "ceil(characters / 4)",
+        "model_tokenizer": None,
+        "read": read_size,
+        "write_contract": write_contract_size,
+        "write_contract_note": "Declared output and closure contract size only; actual generated output tokens are runtime-dependent.",
+        "meta": meta_size,
+        "skill": skill_size,
+        "total": read_size,
+    }
+
+
+def _text_size(value: str) -> dict[str, int]:
+    characters = len(value)
+    return {
+        "bytes_utf8": len(value.encode("utf-8")),
+        "characters": characters,
+        "estimated_tokens": (characters + 3) // 4,
+    }
+
+
+def _sum_text_sizes(sizes: list[dict[str, int]]) -> dict[str, int]:
+    return {
+        "bytes_utf8": sum(size["bytes_utf8"] for size in sizes),
+        "characters": sum(size["characters"] for size in sizes),
+        "estimated_tokens": sum(size["estimated_tokens"] for size in sizes),
     }
 
 

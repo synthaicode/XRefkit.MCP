@@ -190,6 +190,23 @@ if __name__ == "__main__":
         self.assertIn("Skill: sample_review", catalog.skills[0].skill_content)
         self.assertEqual(catalog.skills[0].skill_links[0]["xid"], "ABC123")
         self.assertEqual(catalog.skills[0].skill_links[0]["resolver_tool"], "get_document_by_xid")
+        self.assertEqual(catalog.skills[0].context_size["unit"], "estimated_tokens")
+        self.assertGreater(catalog.skills[0].context_size["meta"]["estimated_tokens"], 0)
+        self.assertGreater(catalog.skills[0].context_size["skill"]["estimated_tokens"], 0)
+        self.assertEqual(
+            catalog.skills[0].context_size["total"]["estimated_tokens"],
+            catalog.skills[0].context_size["meta"]["estimated_tokens"]
+            + catalog.skills[0].context_size["skill"]["estimated_tokens"],
+        )
+        self.assertEqual(
+            catalog.skills[0].context_size["read"],
+            catalog.skills[0].context_size["total"],
+        )
+        self.assertGreater(
+            catalog.skills[0].context_size["write_contract"]["estimated_tokens"],
+            0,
+        )
+        self.assertIn("runtime-dependent", catalog.skills[0].context_size["write_contract_note"])
         self.assertEqual(
             catalog.get_repository_identity()["cache_namespace"],
             catalog.repository_fingerprint,
@@ -277,6 +294,10 @@ if __name__ == "__main__":
 
         self.assertIsNone(skill["meta_content"])
         self.assertIsNone(skill["skill_content"])
+        self.assertEqual(skill["context_size"]["unit"], "estimated_tokens")
+        self.assertGreater(skill["context_size"]["total"]["estimated_tokens"], 0)
+        self.assertEqual(skill["context_size"]["read"], skill["context_size"]["total"])
+        self.assertGreater(skill["context_size"]["write_contract"]["estimated_tokens"], 0)
         self.assertEqual(
             {document["xid"] for document in skill["document_versions"]},
             {"SKILLMETA", "SKILLDOC"},

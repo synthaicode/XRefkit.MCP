@@ -292,6 +292,15 @@ Skill details only after semantic routing shows they are needed. Fetch
 client-tool manifests or packages only after the selected Skill declares
 client-side `required_tools`.
 
+Skill catalog entries and `get_skill` responses include `context_size`, a
+per-Skill size report. `read` reports the size of `meta_content` plus
+`skill_content`. `write_contract` reports the declared output and closure
+contract size; actual generated output tokens are runtime-dependent. The server
+also keeps the `meta`, `skill`, and `total` breakdowns. It reports UTF-8 bytes,
+character count, and an estimated token count using `ceil(characters / 4)` so
+clients can compare Skill context cost before loading or injecting procedure
+bodies.
+
 The startup response sets `access_policy.mode` to `mcp_only`. In this mode, the
 client must treat XRefKit MCP as the source of truth for governance content:
 

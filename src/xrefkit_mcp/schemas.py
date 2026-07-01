@@ -93,6 +93,7 @@ class SkillCatalogEntry:
     skill_links: list[dict[str, str]]
     path: str
     meta_path: str
+    context_size: dict[str, Any]
     missing: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
