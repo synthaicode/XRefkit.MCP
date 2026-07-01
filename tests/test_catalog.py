@@ -320,6 +320,9 @@ if __name__ == "__main__":
         self.assertTrue(
             any("Materialize and apply startup references" in item for item in context["client_instructions"])
         )
+        self.assertTrue(
+            any("Do not automatically load all links from startup references" in item for item in context["client_instructions"])
+        )
         self.assertEqual(
             context["context_injection_policy"]["default_document_body_mode"],
             "lazy",

@@ -446,6 +446,7 @@ class XRefCatalog:
                 "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
                 "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
                 "Do not assume referenced Markdown files exist on the client filesystem.",
+                "Do not automatically load all links from startup references; use links only when the current task actually needs them.",
                 "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
                 "Use the returned document content as the authoritative text for that XID.",
                 "For Skill entries, use skill_content as the procedure body and resolve skill_links through get_document_by_xid when needed.",
