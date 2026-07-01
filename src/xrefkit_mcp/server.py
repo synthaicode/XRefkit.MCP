@@ -160,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
         known_document_versions: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         result = catalog.get_startup_context(known_document_versions)
+        for xid in result.get("load_order", []):
+            _log_xid_query("get_startup_context", xid)
         _mark_startup_loaded(ctx)
         return result
 
@@ -196,7 +198,10 @@ def main(argv: list[str] | None = None) -> int:
     @app.tool()
     def build_knowledge_context(ctx: Context, query: str, limit: int = 5) -> dict[str, Any]:
         _require_startup_loaded(ctx, "build_knowledge_context")
-        return _with_control_reminder(catalog.build_knowledge_context(query, limit))
+        result = catalog.build_knowledge_context(query, limit)
+        for expanded in result.get("entries", []):
+            _log_xid_query("build_knowledge_context", expanded["entry"]["xid"])
+        return _with_control_reminder(result)
 
     @app.tool()
     def list_skills(

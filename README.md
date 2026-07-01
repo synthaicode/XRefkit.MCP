@@ -516,10 +516,24 @@ The distribution currently includes:
 - `tools/**/*.py`
 - support files under `tools/profiles/`
 - `tools/README.md`
+- `skills/**/*.py` (excluding `__pycache__`) — scripts a Skill's own SKILL.md
+  instructs running directly by relative path, such as
+  `skills/import_skill/scripts/inspect_imported_skill.py`, distributed the
+  same way and under the same gate as `tools/` since they live outside any
+  specific Skill's `get_skill` response body
 
 The C# `tools/structure_graph/` project is not bundled by the Python tool
 distribution. Python tools that consume `structure_graph` output still expect
 that output to be produced separately on the client side.
+
+`get_client_tool_pip_package` scopes its zip to `tools/**` only: it is the
+only tree declared as an installable package
+(`[tool.setuptools.packages.find] include = ["tools*"]`), and `skills/**/*.py`
+files are invoked directly by relative path rather than imported, so
+bundling them there would silently vanish on `pip install` instead of
+landing anywhere reachable. Use `get_client_tool_file` or
+`get_client_tool_bundle` for `skills/**/*.py` files instead of the pip
+package.
 
 ## Client-Side fm Runtime
 
@@ -614,6 +628,16 @@ content over the network. Bind to `127.0.0.1` unless the network is trusted or a
 reverse proxy / gateway provides authentication and transport security.
 
 Do not expose `0.0.0.0:8000` directly to an untrusted network.
+
+## Server Console Logging
+
+Every XID resolved through `get_document_by_xid`, `expand_knowledge`,
+`get_knowledge_summary`, `get_startup_context` (each `load_order` XID), and
+`build_knowledge_context` (each expanded entry's XID) is logged to the
+server's console (stderr for `stdio`) as
+`xrefkit_mcp xid_query tool=<tool> xid=<xid> known_version=<known_version>`,
+at `INFO` level. Use `--log-level debug|info|warning|error|critical` to
+control verbosity; `--log-level warning` or higher suppresses these lines.
 
 ## Boundary
 
