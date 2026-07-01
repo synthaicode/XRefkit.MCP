@@ -4,6 +4,7 @@ import json
 import re
 import tempfile
 from collections.abc import Awaitable, Callable, Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -154,24 +155,82 @@ class XidDocumentCache:
             Awaitable[dict[str, Any]],
         ],
     ) -> dict[str, Any]:
-        response = await fetch_startup(self.startup_versions())
+        known_versions = self.startup_versions()
+        response = await fetch_startup(known_versions)
         try:
             references = [
                 self.materialize(reference)
                 for reference in response["references"]
             ]
         except (DocumentCacheProtocolError, KeyError, TypeError):
-            response = await fetch_startup({})
+            known_versions = {}
+            response = await fetch_startup(known_versions)
             references = [
                 self.materialize(reference)
                 for reference in response["references"]
             ]
         result = dict(response)
         result["references"] = references
+        self._append_startup_decision_log(response, references, known_versions)
         self._store_startup_index(
             [str(reference["xid"]) for reference in references]
         )
         return result
+
+    def startup_decision_log_path(self) -> Path:
+        return self.cache_dir / "_startup_decisions.jsonl"
+
+    def startup_decision_log_entries(self) -> list[dict[str, Any]]:
+        try:
+            lines = self.startup_decision_log_path().read_text(
+                encoding="utf-8"
+            ).splitlines()
+        except FileNotFoundError:
+            return []
+        entries: list[dict[str, Any]] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            entries.append(json.loads(line))
+        return entries
+
+    def _append_startup_decision_log(
+        self,
+        response: dict[str, Any],
+        references: list[dict[str, Any]],
+        known_versions: dict[str, str],
+    ) -> None:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        startup_contract_pack = response.get("startup_contract_pack")
+        source_xids = _string_list(
+            startup_contract_pack.get("source_xids")
+            if isinstance(startup_contract_pack, dict)
+            else None
+        )
+        load_order_xids = _string_list(response.get("load_order"))
+        entry = {
+            "schema_version": 1,
+            "event": "startup_xid_decision",
+            "logged_at": datetime.now(UTC).isoformat(),
+            "repository_fingerprint": self.repository_fingerprint,
+            "known_version_xids": sorted(known_versions),
+            "load_order_xids": load_order_xids,
+            "startup_contract_pack_source_xids": source_xids,
+            "reference_xids": [str(reference["xid"]) for reference in references],
+            "client_decision_xids": _unique_strings(
+                [
+                    *load_order_xids,
+                    *source_xids,
+                    *(str(reference["xid"]) for reference in references),
+                ]
+            ),
+        }
+        with self.startup_decision_log_path().open(
+            mode="a",
+            encoding="utf-8",
+        ) as log_file:
+            log_file.write(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+            log_file.write("\n")
 
     def _store_startup_index(self, xids: list[str]) -> None:
         for xid in xids:
@@ -278,3 +337,20 @@ class XidDocumentCache:
     def _validate_xid(xid: str) -> None:
         if not XID_PATTERN.fullmatch(xid):
             raise ValueError(f"invalid XID for cache key: {xid!r}")
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _unique_strings(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result

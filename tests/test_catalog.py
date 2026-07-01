@@ -323,6 +323,9 @@ if __name__ == "__main__":
         self.assertTrue(
             any("Do not automatically load all links from startup references" in item for item in context["client_instructions"])
         )
+        self.assertTrue(
+            any("client-side audit log" in item for item in context["client_instructions"])
+        )
         self.assertEqual(
             context["context_injection_policy"]["default_document_body_mode"],
             "lazy",
@@ -428,6 +431,7 @@ if __name__ == "__main__":
         obligation_ids = {item["id"] for item in context["client_obligations"]}
         self.assertIn("startup.first_call", obligation_ids)
         self.assertIn("content.mcp_only", obligation_ids)
+        self.assertIn("startup.log_decision_xids", obligation_ids)
         self.assertIn("tools.materialize_from_mcp", obligation_ids)
         self.assertIn("context.no_duplicate_xid_body_per_session", obligation_ids)
 

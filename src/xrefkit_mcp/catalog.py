@@ -449,6 +449,7 @@ class XRefCatalog:
                 "Do not automatically load all links from startup references; use links only when the current task actually needs them.",
                 "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
                 "Use the returned document content as the authoritative text for that XID.",
+                "At startup, record the XIDs used for client-side routing, policy, or context-injection decisions in a client-side audit log.",
                 "For Skill entries, use skill_content as the procedure body and resolve skill_links through get_document_by_xid when needed.",
                 "Keep client-side XID document cache entries only when cache_policy.cache_recommended is true.",
                 "Fetch client-side tool manifests or packages only after a selected Skill declares client-side required_tools.",
@@ -872,6 +873,14 @@ def _client_obligations() -> list[ClientObligation]:
             statement="Resolve needed Markdown links by XID through get_document_by_xid.",
             enforcement_owner="client",
             verification="link resolver uses resolver_tool and resolver_argument from link metadata",
+        ),
+        ClientObligation(
+            id="startup.log_decision_xids",
+            level="must",
+            applies_when="startup context is materialized by the client",
+            statement="Record the startup XIDs used for client-side routing, policy, or context-injection decisions in a client-side audit log.",
+            enforcement_owner="client",
+            verification="client startup audit log contains repository_fingerprint, load_order_xids, startup_contract_pack_source_xids, reference_xids, and client_decision_xids",
         ),
         ClientObligation(
             id="tools.materialize_from_mcp",
