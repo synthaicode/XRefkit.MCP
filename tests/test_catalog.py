@@ -320,9 +320,27 @@ if __name__ == "__main__":
         self.assertTrue(
             any("Materialize and apply startup references" in item for item in context["client_instructions"])
         )
+        self.assertTrue(
+            any("Do not automatically load all links from startup references" in item for item in context["client_instructions"])
+        )
+        self.assertTrue(
+            any("client-side audit log" in item for item in context["client_instructions"])
+        )
         self.assertEqual(
             context["context_injection_policy"]["default_document_body_mode"],
             "lazy",
+        )
+        self.assertEqual(
+            context["context_injection_policy"]["model_context_format"],
+            "plain_text",
+        )
+        self.assertEqual(
+            context["context_injection_policy"]["model_context_source"],
+            "startup_contract_pack.body",
+        )
+        self.assertIs(
+            context["context_injection_policy"]["do_not_inject_raw_startup_json"],
+            True,
         )
         self.assertIs(
             context["context_injection_policy"]["materialize_does_not_imply_prompt_injection"],
@@ -390,33 +408,32 @@ if __name__ == "__main__":
         self.assertNotIn("target", first_link)
         self.assertEqual(first_link["resolver_tool"], "get_document_by_xid")
         self.assertEqual(first_link["resolver_argument"], "xid")
-        self.assertEqual(context["workflows"][0]["flow_id"], "FLOW-SAMPLE")
+        self.assertNotIn("workflows", context)
+        self.assertNotIn("workflow_protocol", context)
+        self.assertNotIn("runtime_role_contract", context)
+        self.assertNotIn("client_tool_distribution", context)
+        routing_refs = {
+            reference["id"]: reference
+            for reference in context["semantic_routing_references"]
+        }
         self.assertEqual(
-            context["workflow_protocol"]["role_ownership"]["checker"],
-            "protocol-owned deterministic run-record verification",
+            routing_refs["skills"]["summary_arguments"],
+            {"include_content": False},
         )
-        self.assertIn(
-            "semantic workflow or Skill routing from user intent",
-            context["workflow_protocol"]["non_deterministic_decisions"],
+        self.assertEqual(routing_refs["skills"]["rank_tool"], "rank_skills_for_purpose")
+        self.assertEqual(routing_refs["skills"]["materialize_tool"], "get_skill")
+        self.assertEqual(routing_refs["workflows"]["summary_tool"], "list_workflows")
+        self.assertEqual(
+            routing_refs["workflows"]["materialize_tool"],
+            "get_document_by_xid",
         )
-        self.assertIn("checker", context["runtime_role_contract"]["roles"])
-        self.assertIn(
-            "check is deterministic progression verification via fm skill verify",
-            context["runtime_role_contract"]["invariants"],
-        )
+        self.assertNotIn("client_tools", routing_refs)
         obligation_ids = {item["id"] for item in context["client_obligations"]}
         self.assertIn("startup.first_call", obligation_ids)
         self.assertIn("content.mcp_only", obligation_ids)
+        self.assertIn("startup.log_decision_xids", obligation_ids)
         self.assertIn("tools.materialize_from_mcp", obligation_ids)
         self.assertIn("context.no_duplicate_xid_body_per_session", obligation_ids)
-        self.assertEqual(
-            context["client_tool_distribution"]["materialization"]["bundle_tool"],
-            "get_client_tool_bundle",
-        )
-        self.assertIs(
-            context["client_tool_distribution"]["update_policy"]["check_on_startup"],
-            True,
-        )
 
     def test_startup_context_omits_cached_reference_bodies(self) -> None:
         catalog = XRefCatalog.build(self.repo)
@@ -441,6 +458,24 @@ if __name__ == "__main__":
             cached["startup_contract_pack"]["source_hashes"],
             {reference["xid"]: reference["content_hash"] for reference in cached["references"]},
         )
+
+    def test_selected_skill_advertises_client_tool_download(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+
+        skill = catalog.get_skill("sample_review")
+        requirements = catalog.get_skill_requirements("sample_review")
+
+        for payload in [skill, requirements]:
+            download = payload["client_tool_download"]
+            self.assertIs(download["required"], True)
+            self.assertIs(download["do_not_download_at_startup"], True)
+            self.assertEqual(download["manifest_tool"], "get_client_tool_manifest")
+            self.assertEqual(download["package_tool"], "get_client_tool_pip_package")
+            self.assertEqual(download["version_check_tool"], "check_client_tool_versions")
+            self.assertEqual(
+                download["required_client_tools"][0]["name"],
+                "fm skill run",
+            )
 
     def test_startup_context_resolves_reference_after_document_move(self) -> None:
         source = self.repo / "docs" / "core" / "contracts" / "016_uncertainty_protocol.md"

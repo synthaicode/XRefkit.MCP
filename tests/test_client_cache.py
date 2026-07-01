@@ -191,6 +191,41 @@ class XidDocumentCacheTests(unittest.IsolatedAsyncioTestCase):
             ["startup one", "startup two"],
         )
         self.assertEqual(first["references"][0]["client_cache_status"], "refreshed")
+        entries = self.cache.startup_decision_log_entries()
+        self.assertEqual(entries[0]["known_version_xids"], [])
+        self.assertEqual(entries[1]["known_version_xids"], ["STARTUP1", "STARTUP2"])
+
+    async def test_resolve_startup_records_client_decision_xids(self) -> None:
+        startup_documents = [
+            cacheable_document("startup one", xid="STARTUP1"),
+            cacheable_document("startup two", xid="STARTUP2"),
+        ]
+
+        async def fetch(known_versions: dict[str, str]) -> dict:
+            return {
+                "load_order": ["STARTUP1", "STARTUP2"],
+                "startup_contract_pack": {
+                    "source_xids": ["STARTUP1", "STARTUP2"],
+                },
+                "references": startup_documents,
+            }
+
+        await self.cache.resolve_startup(fetch)
+
+        entries = self.cache.startup_decision_log_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["event"], "startup_xid_decision")
+        self.assertEqual(
+            entries[0]["repository_fingerprint"],
+            REPOSITORY_FINGERPRINT,
+        )
+        self.assertEqual(entries[0]["load_order_xids"], ["STARTUP1", "STARTUP2"])
+        self.assertEqual(
+            entries[0]["startup_contract_pack_source_xids"],
+            ["STARTUP1", "STARTUP2"],
+        )
+        self.assertEqual(entries[0]["reference_xids"], ["STARTUP1", "STARTUP2"])
+        self.assertEqual(entries[0]["client_decision_xids"], ["STARTUP1", "STARTUP2"])
 
     async def test_resolve_refetches_when_server_omits_content_without_cache(self) -> None:
         document = cacheable_document("recovered content")

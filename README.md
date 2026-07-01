@@ -196,8 +196,9 @@ authoritative.
 - Resolve XID-linked documents through the MCP resolver named in
   `get_startup_context`, normally `get_document_by_xid`.
 - Use MCP catalog tools for workflows, Skills, knowledge entries, tool
-  contracts, closure contracts, unknown protocol, and client-tool distribution
-  when they are available.
+  contracts, closure contracts, and unknown protocol when they are available.
+- Fetch client-tool distribution only after the selected Skill declares
+  client-side `required_tools`.
 
 If MCP is unavailable, follow the repository-defined loading process and treat
 loaded AGENTS.md, Skills, knowledge, workflow definitions, and governance labels
@@ -232,14 +233,24 @@ That response contains:
 - `link_resolution`
 - `startup_contract_pack`, the compressed model-facing startup contract
 - startup reference metadata with full source bodies omitted
-- workflow catalog entries
-- `workflow_protocol`
-- executor/checker runtime role contract
-- client-tool distribution metadata
+- `semantic_routing_references`, lightweight pointers to routing tools such as
+  `list_skills`, `rank_skills_for_purpose`, `list_workflows`, and
+  `search_knowledge_catalog`
 
 The client must not assume the XRefKit repository exists on the client machine.
 Use the startup contract pack as the model-facing startup text and resolve any
 needed source document bodies through MCP by XID.
+
+Do not inject the raw `get_startup_context` JSON into the model prompt. Treat
+the JSON response as machine-readable control metadata. The model-facing
+initialization text is the plain-text `startup_contract_pack.body`; keep routing
+references as client-side metadata until a task needs them.
+
+The startup response intentionally omits full workflow catalogs, Skill
+procedures, runtime-role details, and client-tool manifests. Fetch workflow or
+Skill details only after semantic routing shows they are needed. Fetch
+client-tool manifests or packages only after the selected Skill declares
+client-side `required_tools`.
 
 The startup response sets `access_policy.mode` to `mcp_only`. In this mode, the
 client must treat XRefKit MCP as the source of truth for governance content:
@@ -405,10 +416,10 @@ XIDs to pass to `known_versions(xids)`.
 Python code under XRefKit `tools/` is distributed for client-side execution. The
 server never runs these tools.
 
-Startup includes `client_tool_distribution`, a manifest with file paths, hashes,
-run hints, package version, and resolver information. During client
-initialization, call `check_client_tool_versions` with the installed package
-versions and install/update the client tools when the check fails.
+Startup does not include client-tool distribution. When `get_skill` or
+`get_skill_requirements` returns `client_tool_download.required: true`, call
+`check_client_tool_versions` with the installed package versions and
+install/update the client tools when the check fails.
 
 The client-tool model assumes the client obtains XRefKit deterministic tools
 from this MCP server. A local XRefKit checkout is useful for development, but it
@@ -416,7 +427,7 @@ is not required by the portable client contract. The server distributes tool
 files or a pip-installable package; the client materializes or installs them and
 runs them in the client-side execution environment.
 
-`client_tool_distribution` includes:
+`get_client_tool_manifest` returns the client-tool distribution. It includes:
 
 - `required_package_ids`
 - `package_versions`
@@ -438,7 +449,7 @@ Example version check:
 }
 ```
 
-To install the tools on a client that does not have the XRefKit checkout:
+To install the tools for a selected Skill that declares client-side tools:
 
 1. Call `get_client_tool_manifest` to inspect available files.
 2. Call `get_client_tool_bundle` to fetch all distributable files, or

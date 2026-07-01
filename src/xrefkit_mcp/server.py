@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from . import __version__
 from .catalog import XRefCatalog
 
 SERVER_VERSION = __version__
+LOGGER = logging.getLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -92,10 +94,12 @@ def main(argv: list[str] | None = None) -> int:
 
     @app.tool()
     def get_knowledge_summary(xid: str) -> dict[str, Any]:
+        _log_xid_query("get_knowledge_summary", xid)
         return catalog.expand_knowledge(xid)["entry"]
 
     @app.tool()
     def expand_knowledge(xid: str) -> dict[str, Any]:
+        _log_xid_query("expand_knowledge", xid)
         return catalog.expand_knowledge(xid)
 
     @app.tool()
@@ -103,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         xid: str,
         known_version: str | None = None,
     ) -> dict[str, Any]:
+        _log_xid_query("get_document_by_xid", xid, known_version)
         return catalog.get_document_by_xid(xid, known_version)
 
     @app.tool()
@@ -189,6 +194,27 @@ def _validate_tls_configuration(
         raise ValueError(f"TLS certificate file does not exist: {ssl_certfile}")
     if not ssl_keyfile.is_file():
         raise ValueError(f"TLS private-key file does not exist: {ssl_keyfile}")
+
+
+def _log_xid_query(
+    tool_name: str,
+    xid: str,
+    known_version: str | None = None,
+) -> None:
+    fields: dict[str, Any] = {
+        "event": "xid_query",
+        "tool": tool_name,
+        "xid": xid,
+    }
+    if known_version is not None:
+        fields["known_version"] = known_version
+    LOGGER.info(
+        "xrefkit_mcp xid_query tool=%s xid=%s known_version=%s",
+        tool_name,
+        xid,
+        known_version or "",
+        extra={"xrefkit_mcp": fields},
+    )
 
 
 def _run_streamable_http(

@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from xrefkit_mcp.server import (
     SERVER_VERSION,
     _endpoint_info,
+    _log_xid_query,
     _should_return_endpoint_info,
     _validate_tls_configuration,
 )
@@ -88,6 +89,16 @@ class TlsConfigurationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "certificate file does not exist"):
                 _validate_tls_configuration("streamable-http", certfile, keyfile)
+
+
+class ServerXidQueryLogTests(unittest.TestCase):
+    def test_logs_xid_queries(self) -> None:
+        with self.assertLogs("xrefkit_mcp.server", level="INFO") as captured:
+            _log_xid_query("get_document_by_xid", "8A666C1FD121", "abc123")
+
+        self.assertIn("tool=get_document_by_xid", captured.output[0])
+        self.assertIn("xid=8A666C1FD121", captured.output[0])
+        self.assertIn("known_version=abc123", captured.output[0])
 
 
 if __name__ == "__main__":

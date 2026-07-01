@@ -203,6 +203,7 @@ class XRefCatalog:
         entry = self._skill_by_id(skill_id)
         entry = _fresh_skill_entry(entry, self.repo_root)
         result = entry.to_dict()
+        result["client_tool_download"] = _client_tool_download_policy(entry)
         if known_document_versions is None:
             return result
 
@@ -229,6 +230,7 @@ class XRefCatalog:
             "skill_id": entry.skill_id,
             "required_knowledge": entry.required_knowledge,
             "required_tools": entry.required_tools,
+            "client_tool_download": _client_tool_download_policy(entry),
             "closure_contract": entry.closure_contract.to_dict(),
             "meta_path": entry.meta_path,
             "meta_content": entry.meta_content,
@@ -339,8 +341,8 @@ class XRefCatalog:
             "expected": expected,
             "results": results,
             "instructions": [
-                "Client should call this during initialization with installed package versions.",
-                "If ok is false, install the package returned by get_client_tool_pip_package before executing client-side tools.",
+                "Client should call this after selecting a Skill that declares client-side required_tools.",
+                "If ok is false, install the package returned by get_client_tool_pip_package before executing that Skill's client-side tools.",
             ],
         }
 
@@ -434,7 +436,6 @@ class XRefCatalog:
                     "xid_link_resolution": "get_document_by_xid",
                     "skill_content": "get_skill",
                     "workflow_catalog": "list_workflows",
-                    "client_tool_distribution": "get_client_tool_manifest",
                 },
             },
             context_injection_policy=_context_injection_policy(),
@@ -445,10 +446,13 @@ class XRefCatalog:
                 "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
                 "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
                 "Do not assume referenced Markdown files exist on the client filesystem.",
+                "Do not automatically load all links from startup references; use links only when the current task actually needs them.",
                 "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
                 "Use the returned document content as the authoritative text for that XID.",
+                "At startup, record the XIDs used for client-side routing, policy, or context-injection decisions in a client-side audit log.",
                 "For Skill entries, use skill_content as the procedure body and resolve skill_links through get_document_by_xid when needed.",
                 "Keep client-side XID document cache entries only when cache_policy.cache_recommended is true.",
+                "Fetch client-side tool manifests or packages only after a selected Skill declares client-side required_tools.",
                 "Send cached content_hash values as known_version or known_document_versions; when cache_status is not_modified, use the locally hash-validated body instead of downloading it again.",
             ],
             client_obligations=_client_obligations(),
@@ -464,10 +468,7 @@ class XRefCatalog:
             load_order=[reference.xid for reference in references],
             startup_contract_pack=_startup_contract_pack(references),
             references=references,
-            workflows=_build_workflows(self.repo_root),
-            workflow_protocol=_workflow_protocol(),
-            runtime_role_contract=_runtime_role_contract(),
-            client_tool_distribution=_client_tool_distribution(self.repo_root),
+            semantic_routing_references=_semantic_routing_references(),
             missing=missing,
         ).to_dict()
 
@@ -874,6 +875,14 @@ def _client_obligations() -> list[ClientObligation]:
             verification="link resolver uses resolver_tool and resolver_argument from link metadata",
         ),
         ClientObligation(
+            id="startup.log_decision_xids",
+            level="must",
+            applies_when="startup context is materialized by the client",
+            statement="Record the startup XIDs used for client-side routing, policy, or context-injection decisions in a client-side audit log.",
+            enforcement_owner="client",
+            verification="client startup audit log contains repository_fingerprint, load_order_xids, startup_contract_pack_source_xids, reference_xids, and client_decision_xids",
+        ),
+        ClientObligation(
             id="tools.materialize_from_mcp",
             level="must",
             applies_when="client executes XRefKit-distributed tools",
@@ -898,6 +907,63 @@ def _client_obligations() -> list[ClientObligation]:
             verification="Prompt assembly maintains a session-visible XID index and records injected_xids, reused_xids, content_hash values, visibility status, and reuse reasons for each model turn.",
         ),
     ]
+
+
+def _semantic_routing_references() -> list[dict[str, object]]:
+    return [
+        {
+            "id": "skills",
+            "purpose": "semantic Skill routing from user intent before procedure load",
+            "summary_tool": "list_skills",
+            "summary_arguments": {"include_content": False},
+            "rank_tool": "rank_skills_for_purpose",
+            "materialize_tool": "get_skill",
+            "materialize_argument": "skill_id",
+            "body_mode": "lazy",
+        },
+        {
+            "id": "workflows",
+            "purpose": "semantic workflow routing and workflow-order lookup",
+            "summary_tool": "list_workflows",
+            "materialize_tool": "get_document_by_xid",
+            "materialize_argument": "doc_xid",
+            "body_mode": "lazy",
+        },
+        {
+            "id": "knowledge",
+            "purpose": "domain-knowledge search after a task or Skill needs evidence",
+            "summary_tool": "search_knowledge_catalog",
+            "summary_arguments": {"limit": 10},
+            "materialize_tool": "expand_knowledge",
+            "materialize_argument": "xid",
+            "body_mode": "lazy",
+        },
+        {
+            "id": "tool_contracts",
+            "purpose": "tool capability lookup when a task needs exact tool boundaries",
+            "summary_tool": "list_tool_contracts",
+            "body_mode": "metadata_only",
+        },
+    ]
+
+
+def _client_tool_download_policy(entry: SkillCatalogEntry) -> dict[str, object]:
+    required_client_tools = [
+        item
+        for item in entry.required_tools
+        if item.get("execution_location") == "client" or item.get("name")
+    ]
+    return {
+        "required": bool(required_client_tools),
+        "required_client_tools": required_client_tools,
+        "download_when": "after this Skill is selected for use and before executing its client-side required_tools",
+        "do_not_download_at_startup": True,
+        "manifest_tool": "get_client_tool_manifest",
+        "package_tool": "get_client_tool_pip_package",
+        "file_tool": "get_client_tool_file",
+        "bundle_tool": "get_client_tool_bundle",
+        "version_check_tool": "check_client_tool_versions",
+    }
 
 
 def _workflow_protocol() -> dict[str, object]:
@@ -945,6 +1011,9 @@ def _workflow_protocol() -> dict[str, object]:
 
 def _context_injection_policy() -> dict[str, object]:
     return {
+        "model_context_format": "plain_text",
+        "model_context_source": "startup_contract_pack.body",
+        "do_not_inject_raw_startup_json": True,
         "default_document_body_mode": "lazy",
         "default_nonstartup_document_body_mode": "lazy",
         "startup_reference_prompt_mode": "required_startup_contract_pack",
