@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import tempfile
 import unittest
 import zipfile
 
@@ -15,6 +16,11 @@ class McpClientIntegrationTests(unittest.TestCase):
         except ImportError as exc:
             self.skipTest(f"mcp integration dependency is unavailable: {exc}")
 
+        # errlog needs a real OS file handle on Windows (subprocess creation
+        # calls stderr.fileno()), so a plain io.StringIO() will not work here.
+        captured_stderr = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+        results: dict[str, object] = {}
+
         async def scenario() -> None:
             server = StdioServerParameters(
                 command="python",
@@ -26,7 +32,7 @@ class McpClientIntegrationTests(unittest.TestCase):
                 ],
                 cwd=r"C:\dev\itsm\XRefkit.MCP",
             )
-            async with stdio_client(server) as (read, write):
+            async with stdio_client(server, errlog=captured_stderr) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
 
@@ -349,7 +355,25 @@ class McpClientIntegrationTests(unittest.TestCase):
                         "string",
                     )
 
+                    knowledge_context_result = await session.call_tool(
+                        "build_knowledge_context",
+                        {"query": "csharp review synchronization", "limit": 3},
+                    )
+                    knowledge_context = knowledge_context_result.structuredContent
+                    self.assertGreater(len(knowledge_context["entries"]), 0)
+                    results["knowledge_context"] = knowledge_context
+
         anyio.run(scenario)
+
+        captured_stderr.seek(0)
+        console_output = captured_stderr.read()
+        captured_stderr.close()
+        self.assertIn("tool=get_startup_context xid=8A666C1FD121", console_output)
+        for expanded in results["knowledge_context"]["entries"]:
+            self.assertIn(
+                f"tool=build_knowledge_context xid={expanded['entry']['xid']}",
+                console_output,
+            )
 
 
 if __name__ == "__main__":

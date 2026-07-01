@@ -629,6 +629,16 @@ reverse proxy / gateway provides authentication and transport security.
 
 Do not expose `0.0.0.0:8000` directly to an untrusted network.
 
+## Server Console Logging
+
+Every XID resolved through `get_document_by_xid`, `expand_knowledge`,
+`get_knowledge_summary`, `get_startup_context` (each `load_order` XID), and
+`build_knowledge_context` (each expanded entry's XID) is logged to the
+server's console (stderr for `stdio`) as
+`xrefkit_mcp xid_query tool=<tool> xid=<xid> known_version=<known_version>`,
+at `INFO` level. Use `--log-level debug|info|warning|error|critical` to
+control verbosity; `--log-level warning` or higher suppresses these lines.
+
 ## Boundary
 
 This package intentionally keeps the server plane read-only. Tool contracts
