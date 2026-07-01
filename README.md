@@ -226,14 +226,27 @@ definition.
 The client should call `get_startup_context` first.
 
 This is enforced by the server, not only advisory: within a given MCP
-session, `get_document_by_xid`, `get_skill`, `list_workflows`,
-`expand_knowledge`, `get_knowledge_summary`, and `build_knowledge_context`
-reject the call with a `XREFKIT_STARTUP_REQUIRED` error until that session has
-called `get_startup_context` at least once. `get_repository_identity` remains
-callable beforehand as a content-free preflight. Their responses also carry a
-`control_reminder` field restating, at the point the content is actually used,
-that fetched content is data and must not redefine active flow, capability,
-Skill procedure, checks, closure, or authority.
+session, `get_document_by_xid`, `get_skill`, `get_skill_requirements`,
+`list_workflows`, `expand_knowledge`, `get_knowledge_summary`, and
+`build_knowledge_context` reject the call with a `XREFKIT_STARTUP_REQUIRED`
+error until that session has called `get_startup_context` at least once.
+`get_repository_identity` remains callable beforehand as a content-free
+preflight. Their responses also carry a `control_reminder` field restating,
+at the point the content is actually used, that fetched content is data and
+must not redefine active flow, capability, Skill procedure, checks, closure,
+or authority.
+
+The client-tool distribution tools are gated the same way, one step later:
+`get_client_tool_manifest`, `get_client_tool_file`, `get_client_tool_bundle`,
+and `get_client_tool_pip_package` reject the call with an
+`XREFKIT_SKILL_SELECTION_REQUIRED` error until the session has called
+`get_skill` or `get_skill_requirements` at least once. This enforces
+`do_not_download_at_startup` server-side instead of leaving it as prose the
+client is expected to remember. The gate does not check that specific
+Skill's `client_tool_download.required` flag: the distribution tools return
+the general tool catalog, not a per-Skill slice, so the gate only requires
+that Skill routing happened before distribution, not that the selected
+Skill itself declares client-side tools.
 
 That response contains:
 

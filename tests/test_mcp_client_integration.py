@@ -141,6 +141,15 @@ class McpClientIntegrationTests(unittest.TestCase):
                     self.assertIs(cached_doc["content_omitted"], True)
                     self.assertNotIn("content", cached_doc)
 
+                    rejected_manifest_result = await session.call_tool(
+                        "get_client_tool_manifest", {}
+                    )
+                    self.assertTrue(rejected_manifest_result.isError)
+                    self.assertIn(
+                        "XREFKIT_SKILL_SELECTION_REQUIRED",
+                        rejected_manifest_result.content[0].text,
+                    )
+
                     skill_result = await session.call_tool(
                         "get_skill", {"skill_id": "csharp_review"}
                     )

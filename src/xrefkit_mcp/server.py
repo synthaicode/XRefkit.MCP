@@ -56,6 +56,34 @@ def _with_control_reminder(result: dict[str, Any]) -> dict[str, Any]:
     return {**result, "control_reminder": _CONTROL_REMINDER}
 
 
+# Sessions that have selected at least one Skill via get_skill or
+# get_skill_requirements. Client-tool distribution tools stay locked until
+# then, matching the documented "download_when: after this Skill is selected
+# for use" / "do_not_download_at_startup" policy in
+# _client_tool_download_policy instead of leaving it advisory. Selecting any
+# Skill unlocks distribution generally: get_client_tool_manifest/bundle are
+# not scoped to one Skill's declared required_tools, so gating on that
+# per-Skill flag would make distribution unreachable for Skills that don't
+# declare required_tools even though the general tool catalog still applies.
+_CLIENT_TOOLS_UNLOCKED_SESSIONS: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+
+def _unlock_client_tools(ctx: Any) -> None:
+    session = _session_of(ctx)
+    if session is not None:
+        _CLIENT_TOOLS_UNLOCKED_SESSIONS.add(session)
+
+
+def _require_client_tools_unlocked(ctx: Any, tool_name: str) -> None:
+    session = _session_of(ctx)
+    if session is not None and session not in _CLIENT_TOOLS_UNLOCKED_SESSIONS:
+        raise RuntimeError(
+            f"XREFKIT_SKILL_SELECTION_REQUIRED: call get_skill or "
+            f"get_skill_requirements to select a Skill before {tool_name} "
+            "in this session."
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="xrefkit-mcp-server")
     parser.add_argument("--repo", required=True, help="Path to an XRefKit repository")
@@ -184,7 +212,9 @@ def main(argv: list[str] | None = None) -> int:
         known_document_versions: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         _require_startup_loaded(ctx, "get_skill")
-        return _with_control_reminder(catalog.get_skill(skill_id, known_document_versions))
+        result = catalog.get_skill(skill_id, known_document_versions)
+        _unlock_client_tools(ctx)
+        return _with_control_reminder(result)
 
     @app.tool()
     def list_workflows(ctx: Context) -> list[dict[str, Any]]:
@@ -192,8 +222,11 @@ def main(argv: list[str] | None = None) -> int:
         return catalog.list_workflows()
 
     @app.tool()
-    def get_skill_requirements(skill_id: str) -> dict[str, Any]:
-        return catalog.get_skill_requirements(skill_id)
+    def get_skill_requirements(ctx: Context, skill_id: str) -> dict[str, Any]:
+        _require_startup_loaded(ctx, "get_skill_requirements")
+        result = catalog.get_skill_requirements(skill_id)
+        _unlock_client_tools(ctx)
+        return _with_control_reminder(result)
 
     @app.tool()
     def rank_skills_for_purpose(purpose: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -204,19 +237,23 @@ def main(argv: list[str] | None = None) -> int:
         return catalog.list_tool_contracts()
 
     @app.tool()
-    def get_client_tool_manifest() -> dict[str, Any]:
+    def get_client_tool_manifest(ctx: Context) -> dict[str, Any]:
+        _require_client_tools_unlocked(ctx, "get_client_tool_manifest")
         return catalog.get_client_tool_manifest()
 
     @app.tool()
-    def get_client_tool_file(path: str) -> dict[str, Any]:
+    def get_client_tool_file(ctx: Context, path: str) -> dict[str, Any]:
+        _require_client_tools_unlocked(ctx, "get_client_tool_file")
         return catalog.get_client_tool_file(path)
 
     @app.tool()
-    def get_client_tool_bundle() -> dict[str, Any]:
+    def get_client_tool_bundle(ctx: Context) -> dict[str, Any]:
+        _require_client_tools_unlocked(ctx, "get_client_tool_bundle")
         return catalog.get_client_tool_bundle()
 
     @app.tool()
-    def get_client_tool_pip_package() -> dict[str, Any]:
+    def get_client_tool_pip_package(ctx: Context) -> dict[str, Any]:
+        _require_client_tools_unlocked(ctx, "get_client_tool_pip_package")
         return catalog.get_client_tool_pip_package()
 
     @app.tool()

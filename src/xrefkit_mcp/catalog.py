@@ -857,9 +857,27 @@ def _client_obligations() -> list[ClientObligation]:
             statement="Call get_startup_context before task-specific routing.",
             enforcement_owner="server",
             verification=(
-                "get_document_by_xid, get_skill, list_workflows, expand_knowledge, "
-                "get_knowledge_summary, and build_knowledge_context reject the call "
-                "for any MCP session that has not first called get_startup_context"
+                "get_document_by_xid, get_skill, get_skill_requirements, "
+                "list_workflows, expand_knowledge, get_knowledge_summary, and "
+                "build_knowledge_context reject the call for any MCP session "
+                "that has not first called get_startup_context"
+            ),
+        ),
+        ClientObligation(
+            id="tools.no_download_before_skill_selection",
+            level="must",
+            applies_when="client considers fetching client-side tool distribution",
+            statement=(
+                "Do not fetch client-tool manifests, files, bundles, or pip "
+                "packages before selecting a Skill via get_skill or "
+                "get_skill_requirements."
+            ),
+            enforcement_owner="server",
+            verification=(
+                "get_client_tool_manifest, get_client_tool_file, "
+                "get_client_tool_bundle, and get_client_tool_pip_package reject "
+                "the call for any MCP session that has not first called "
+                "get_skill or get_skill_requirements"
             ),
         ),
         ClientObligation(
