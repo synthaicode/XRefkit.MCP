@@ -903,6 +903,7 @@ def _client_tool_distribution(root: Path) -> ClientToolDistribution:
             "Run Python tools on the client side with the client repository root as the working directory.",
             "Some tools expect sibling tools modules, so preserve the returned directory layout.",
             "Some tools call external programs such as git, dotnet, npm, or project-specific commands; satisfy those prerequisites on the client side before execution.",
+            "This distribution also includes Skill-embedded scripts under skills/**/*.py that a Skill's SKILL.md instructs running directly by relative path (e.g. skills/<id>/scripts/*.py). get_client_tool_pip_package's tools/-only package does not include these; use get_client_tool_file or get_client_tool_bundle for them.",
         ],
     )
 
@@ -1340,17 +1341,34 @@ def _session_context_deduplication() -> dict[str, object]:
 
 def _client_tool_files(root: Path) -> list[ClientToolFile]:
     tools_root = root / "tools"
-    if not tools_root.exists():
-        return []
-    paths = sorted(tools_root.glob("**/*.py"))
-    support_paths = [
-        path
-        for path in sorted((tools_root / "profiles").glob("**/*"))
-        if path.is_file()
-    ]
-    readme = tools_root / "README.md"
-    if readme.exists():
-        support_paths.append(readme)
+    paths: list[Path] = []
+    support_paths: list[Path] = []
+    if tools_root.exists():
+        paths.extend(sorted(tools_root.glob("**/*.py")))
+        support_paths.extend(
+            path
+            for path in sorted((tools_root / "profiles").glob("**/*"))
+            if path.is_file()
+        )
+        readme = tools_root / "README.md"
+        if readme.exists():
+            support_paths.append(readme)
+
+    # Some Skills embed their own client-side scripts directly under
+    # skills/<id>/... (e.g. scripts/, references/) instead of tools/, and
+    # their SKILL.md procedures instruct running them by relative path.
+    # Without this, a remote client with no local checkout has no way to
+    # obtain those scripts even though tools/ distribution is otherwise
+    # unconditionally available once any Skill is selected.
+    skills_root = root / "skills"
+    if skills_root.exists():
+        paths.extend(
+            sorted(
+                path
+                for path in skills_root.glob("**/*.py")
+                if "__pycache__" not in path.parts
+            )
+        )
 
     result: list[ClientToolFile] = []
     for path in [*paths, *support_paths]:
@@ -1373,7 +1391,14 @@ def _client_tool_files(root: Path) -> list[ClientToolFile]:
 
 
 def _client_tool_pip_package(root: Path) -> ClientToolPipPackage:
-    files = _client_tool_files(root)
+    # Scoped to tools/ only: these are the files declared installable via
+    # [tool.setuptools.packages.find]. Skill-embedded scripts under skills/
+    # are invoked by relative file path per their SKILL.md, not imported as
+    # a package, and skills/ has no __init__.py chain making it one; bundling
+    # them here would silently vanish on `pip install` since setuptools would
+    # never install undiscovered loose files into site-packages. They remain
+    # available via get_client_tool_file/get_client_tool_bundle instead.
+    files = [file for file in _client_tool_files(root) if file.path.startswith("tools/")]
     package_root = f"xrefkit-client-tools-{CLIENT_TOOL_PACKAGE_VERSION}"
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -1407,6 +1432,10 @@ def _client_tool_pip_package(root: Path) -> ClientToolPipPackage:
             "Install in a project virtual environment to avoid conflicts with any unrelated package named tools.",
             "The package contains Python tools only; C# tools/structure_graph is not bundled.",
             "The MCP server only distributes the package; tool execution is client-side.",
+            "Skill-embedded scripts under skills/**/*.py are not included in this "
+            "package. Fetch them with get_client_tool_file or "
+            "get_client_tool_bundle and run them by their returned relative "
+            "path instead.",
         ],
     )
 

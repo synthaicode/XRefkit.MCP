@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import io
 import unittest
+import zipfile
 
 
 class McpClientIntegrationTests(unittest.TestCase):
@@ -270,6 +273,13 @@ class McpClientIntegrationTests(unittest.TestCase):
                             for file in manifest["files"]
                         )
                     )
+                    self.assertTrue(
+                        any(
+                            file["path"]
+                            == "skills/import_skill/scripts/inspect_imported_skill.py"
+                            for file in manifest["files"]
+                        )
+                    )
 
                     tool_file_result = await session.call_tool(
                         "get_client_tool_file",
@@ -280,6 +290,19 @@ class McpClientIntegrationTests(unittest.TestCase):
                     self.assertIn("argparse", tool_file["imports"])
                     self.assertIn("def main", tool_file["content"])
 
+                    skill_script_result = await session.call_tool(
+                        "get_client_tool_file",
+                        {
+                            "path": "skills/import_skill/scripts/inspect_imported_skill.py"
+                        },
+                    )
+                    skill_script = skill_script_result.structuredContent
+                    self.assertEqual(skill_script["kind"], "python")
+                    self.assertEqual(
+                        skill_script["run_hint"],
+                        "python skills/import_skill/scripts/inspect_imported_skill.py",
+                    )
+
                     package_result = await session.call_tool(
                         "get_client_tool_pip_package", {}
                     )
@@ -288,6 +311,18 @@ class McpClientIntegrationTests(unittest.TestCase):
                     self.assertEqual(package["version"], "0.1.0")
                     self.assertIn("python -m pip install", package["install_command"])
                     self.assertGreater(len(package["content_base64"]), 1000)
+                    self.assertTrue(
+                        any(
+                            "skills" in warning
+                            for warning in package["warnings"]
+                        )
+                    )
+                    package_zip = zipfile.ZipFile(
+                        io.BytesIO(base64.b64decode(package["content_base64"]))
+                    )
+                    self.assertFalse(
+                        any("/skills/" in name for name in package_zip.namelist())
+                    )
 
                     version_result = await session.call_tool(
                         "check_client_tool_versions",

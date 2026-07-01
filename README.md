@@ -516,10 +516,24 @@ The distribution currently includes:
 - `tools/**/*.py`
 - support files under `tools/profiles/`
 - `tools/README.md`
+- `skills/**/*.py` (excluding `__pycache__`) — scripts a Skill's own SKILL.md
+  instructs running directly by relative path, such as
+  `skills/import_skill/scripts/inspect_imported_skill.py`, distributed the
+  same way and under the same gate as `tools/` since they live outside any
+  specific Skill's `get_skill` response body
 
 The C# `tools/structure_graph/` project is not bundled by the Python tool
 distribution. Python tools that consume `structure_graph` output still expect
 that output to be produced separately on the client side.
+
+`get_client_tool_pip_package` scopes its zip to `tools/**` only: it is the
+only tree declared as an installable package
+(`[tool.setuptools.packages.find] include = ["tools*"]`), and `skills/**/*.py`
+files are invoked directly by relative path rather than imported, so
+bundling them there would silently vanish on `pip install` instead of
+landing anywhere reachable. Use `get_client_tool_file` or
+`get_client_tool_bundle` for `skills/**/*.py` files instead of the pip
+package.
 
 ## Client-Side fm Runtime
 
