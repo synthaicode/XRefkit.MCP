@@ -53,6 +53,8 @@ The MCP server publishes:
   context-direction guard
 - Skill Content: `meta.md` and `SKILL.md` bodies with resolvable XID links
 - Client Tools: versioned Python tools as files or a pip-installable package
+- Core Runtime: the `fm` Skill-execution runtime as files or a pip-installable
+  package, fetched unconditionally rather than gated behind Skill selection
 
 The server sends read-only definitions and packages only:
 
@@ -61,6 +63,7 @@ The server sends read-only definitions and packages only:
 - knowledge catalog entries from `knowledge/**/*.md`
 - Skill metadata and `SKILL.md` content from `skills/**`
 - distributable Python tool files from `tools/**/*.py` for client-side execution
+- the `fm/**/*.py` Skill-execution runtime for client-side execution
 - read-only tool contracts for catalog, expansion, and routing tools
 
 It does not execute Skills, mutate repositories, approve knowledge updates, or
@@ -225,11 +228,48 @@ definition.
 
 The client should call `get_startup_context` first.
 
+This is enforced by the server, not only advisory: within a given MCP
+session, `get_document_by_xid`, `get_skill`, `get_skill_requirements`,
+`list_workflows`, `expand_knowledge`, `get_knowledge_summary`, and
+`build_knowledge_context` reject the call with a `XREFKIT_STARTUP_REQUIRED`
+error until that session has called `get_startup_context` at least once.
+`get_repository_identity` remains callable beforehand as a content-free
+preflight. Their responses also carry a `control_reminder` field restating,
+at the point the content is actually used, that fetched content is data and
+must not redefine active flow, capability, Skill procedure, checks, closure,
+or authority.
+
+The client-tool distribution tools are gated the same way, one step later:
+`get_client_tool_manifest`, `get_client_tool_file`, `get_client_tool_bundle`,
+and `get_client_tool_pip_package` reject the call with an
+`XREFKIT_SKILL_SELECTION_REQUIRED` error until the session has called
+`get_skill` or `get_skill_requirements` at least once. This enforces
+`do_not_download_at_startup` server-side instead of leaving it as prose the
+client is expected to remember. The gate does not check that specific
+Skill's `client_tool_download.required` flag: the distribution tools return
+the general tool catalog, not a per-Skill slice, so the gate only requires
+that Skill routing happened before distribution, not that the selected
+Skill itself declares client-side tools.
+
+The `fm` runtime that implements Skill execution
+(`python -m fm skill run/workitem/artifact/concern/phase/verify/close`) is
+distributed separately from the per-Skill `tools/` and is deliberately **not**
+gated behind Skill selection: `get_fm_runtime_manifest`, `get_fm_runtime_file`,
+`get_fm_runtime_bundle`, and `get_fm_runtime_pip_package` only require that
+`get_startup_context` was called. Unlike optional per-Skill tools, `fm` is
+needed by essentially every Skill-backed session, so `get_startup_context`
+returns it directly as `core_runtime_distribution` and `client_instructions`
+tells the client to fetch it right away, before any Skill routing — deferring
+it the way `tools/` is deferred would only guarantee an extra round-trip right
+when `python -m fm skill run` is about to be required. `check_fm_runtime_version`
+mirrors `check_client_tool_versions` for this package.
+
 That response contains:
 
 - `access_policy`
 - `client_instructions`
 - `client_obligations`
+- `core_runtime_distribution`, the fm-runtime manifest to fetch immediately
 - `link_resolution`
 - `startup_contract_pack`, the compressed model-facing startup contract
 - startup reference metadata with full source bodies omitted
@@ -480,6 +520,25 @@ The distribution currently includes:
 The C# `tools/structure_graph/` project is not bundled by the Python tool
 distribution. Python tools that consume `structure_graph` output still expect
 that output to be produced separately on the client side.
+
+## Client-Side fm Runtime
+
+`fm` (`python -m fm skill run/workitem/artifact/concern/phase/verify/close`)
+is distributed the same way as `tools/`, through `get_fm_runtime_manifest`,
+`get_fm_runtime_file`, `get_fm_runtime_bundle`, `get_fm_runtime_pip_package`,
+and `check_fm_runtime_version`, but with the opposite timing policy: fetch it
+right after `get_startup_context`, not after a Skill selection.
+`get_startup_context` returns its manifest directly as
+`core_runtime_distribution` so the client does not need to call
+`get_fm_runtime_manifest` separately just to discover it.
+
+```powershell
+python -m pip install xrefkit-fm-runtime-0.1.0.zip
+```
+
+or materialize `get_fm_runtime_bundle`'s files at `fm/` under the client-side
+repository root and run `python -m fm` there. The package depends on PyYAML;
+installing via the pip package resolves this automatically.
 
 ## Response Envelope Note
 

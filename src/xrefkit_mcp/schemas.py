@@ -287,6 +287,7 @@ class StartupContext:
     access_policy: dict[str, Any]
     context_injection_policy: dict[str, Any]
     session_context_deduplication: dict[str, Any]
+    core_runtime_distribution: dict[str, Any]
     client_instructions: list[str]
     client_obligations: list[ClientObligation]
     link_resolution: dict[str, str]
@@ -303,6 +304,7 @@ class StartupContext:
             "access_policy": self.access_policy,
             "context_injection_policy": self.context_injection_policy,
             "session_context_deduplication": self.session_context_deduplication,
+            "core_runtime_distribution": self.core_runtime_distribution,
             "client_instructions": self.client_instructions,
             "client_obligations": [
                 obligation.to_dict() for obligation in self.client_obligations

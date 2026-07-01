@@ -41,6 +41,25 @@ class McpClientIntegrationTests(unittest.TestCase):
                         identity["repository_fingerprint"],
                     )
 
+                    rejected_result = await session.call_tool(
+                        "get_document_by_xid",
+                        {"xid": "8A666C1FD121"},
+                    )
+                    self.assertTrue(rejected_result.isError)
+                    self.assertIn(
+                        "XREFKIT_STARTUP_REQUIRED",
+                        rejected_result.content[0].text,
+                    )
+
+                    rejected_fm_result = await session.call_tool(
+                        "get_fm_runtime_manifest", {}
+                    )
+                    self.assertTrue(rejected_fm_result.isError)
+                    self.assertIn(
+                        "XREFKIT_STARTUP_REQUIRED",
+                        rejected_fm_result.content[0].text,
+                    )
+
                     startup_result = await session.call_tool("get_startup_context", {})
                     startup = startup_result.structuredContent
                     self.assertEqual(
@@ -67,6 +86,42 @@ class McpClientIntegrationTests(unittest.TestCase):
                     }
                     self.assertIn("startup.first_call", obligation_ids)
                     self.assertIn("tools.materialize_from_mcp", obligation_ids)
+                    self.assertIn("core_runtime.fetch_immediately", obligation_ids)
+
+                    core_runtime = startup["core_runtime_distribution"]
+                    self.assertEqual(core_runtime["package_id"], "xrefkit-fm-runtime")
+                    self.assertIs(
+                        core_runtime["update_policy"]["gated_by_skill_selection"], False
+                    )
+
+                    # Unlike client_tool_download, the fm runtime must be
+                    # reachable without ever selecting a Skill first.
+                    fm_bundle_result = await session.call_tool(
+                        "get_fm_runtime_bundle", {}
+                    )
+                    self.assertFalse(fm_bundle_result.isError)
+                    fm_bundle = fm_bundle_result.structuredContent
+                    fm_paths = {file["path"] for file in fm_bundle["files"]}
+                    self.assertIn("fm/__init__.py", fm_paths)
+                    self.assertIn("fm/skillrun.py", fm_paths)
+
+                    fm_file_result = await session.call_tool(
+                        "get_fm_runtime_file", {"path": "fm/__init__.py"}
+                    )
+                    self.assertIn("__version__", fm_file_result.structuredContent["content"])
+
+                    fm_package_result = await session.call_tool(
+                        "get_fm_runtime_pip_package", {}
+                    )
+                    fm_package = fm_package_result.structuredContent
+                    self.assertEqual(fm_package["package_id"], "xrefkit-fm-runtime")
+                    self.assertGreater(len(fm_package["content_base64"]), 1000)
+
+                    fm_version_result = await session.call_tool(
+                        "check_fm_runtime_version", {"installed": {}}
+                    )
+                    self.assertIs(fm_version_result.structuredContent["ok"], False)
+
                     uncertainty = next(
                         ref
                         for ref in startup["references"]
@@ -118,6 +173,7 @@ class McpClientIntegrationTests(unittest.TestCase):
                         identity["repository_fingerprint"],
                     )
                     self.assertGreater(len(startup_doc["content"]), 1000)
+                    self.assertIn("control_reminder", startup_doc)
                     cached_doc_result = await session.call_tool(
                         "get_document_by_xid",
                         {
@@ -129,6 +185,15 @@ class McpClientIntegrationTests(unittest.TestCase):
                     self.assertEqual(cached_doc["cache_status"], "not_modified")
                     self.assertIs(cached_doc["content_omitted"], True)
                     self.assertNotIn("content", cached_doc)
+
+                    rejected_manifest_result = await session.call_tool(
+                        "get_client_tool_manifest", {}
+                    )
+                    self.assertTrue(rejected_manifest_result.isError)
+                    self.assertIn(
+                        "XREFKIT_SKILL_SELECTION_REQUIRED",
+                        rejected_manifest_result.content[0].text,
+                    )
 
                     skill_result = await session.call_tool(
                         "get_skill", {"skill_id": "csharp_review"}
