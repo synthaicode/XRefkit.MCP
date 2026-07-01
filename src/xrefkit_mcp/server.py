@@ -260,6 +260,33 @@ def main(argv: list[str] | None = None) -> int:
     def check_client_tool_versions(installed: dict[str, str] | None = None) -> dict[str, Any]:
         return catalog.check_client_tool_versions(installed)
 
+    # The fm runtime is not gated behind Skill selection like the per-Skill
+    # tools/ distribution above: it is needed by essentially every
+    # Skill-backed session, so only startup ordering is enforced here.
+    @app.tool()
+    def get_fm_runtime_manifest(ctx: Context) -> dict[str, Any]:
+        _require_startup_loaded(ctx, "get_fm_runtime_manifest")
+        return catalog.get_fm_runtime_manifest()
+
+    @app.tool()
+    def get_fm_runtime_file(ctx: Context, path: str) -> dict[str, Any]:
+        _require_startup_loaded(ctx, "get_fm_runtime_file")
+        return catalog.get_fm_runtime_file(path)
+
+    @app.tool()
+    def get_fm_runtime_bundle(ctx: Context) -> dict[str, Any]:
+        _require_startup_loaded(ctx, "get_fm_runtime_bundle")
+        return catalog.get_fm_runtime_bundle()
+
+    @app.tool()
+    def get_fm_runtime_pip_package(ctx: Context) -> dict[str, Any]:
+        _require_startup_loaded(ctx, "get_fm_runtime_pip_package")
+        return catalog.get_fm_runtime_pip_package()
+
+    @app.tool()
+    def check_fm_runtime_version(installed: dict[str, str] | None = None) -> dict[str, Any]:
+        return catalog.check_fm_runtime_version(installed)
+
     if args.transport == "streamable-http":
         _run_streamable_http(
             app,

@@ -51,6 +51,8 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9_+#.-]+")
 IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([A-Za-z0-9_.]+)", re.MULTILINE)
 CLIENT_TOOL_PACKAGE_ID = "xrefkit-client-python-tools"
 CLIENT_TOOL_PACKAGE_VERSION = "0.1.0"
+FM_RUNTIME_PACKAGE_ID = "xrefkit-fm-runtime"
+FM_RUNTIME_VERSION_RE = re.compile(r"__version__\s*=\s*[\"']([^\"']+)[\"']")
 CACHE_MAX_VERSION_PAYLOAD_RATIO = 0.5
 STARTUP_REFERENCE_DEFINITIONS = [
     (
@@ -346,6 +348,61 @@ class XRefCatalog:
             ],
         }
 
+    def get_fm_runtime_manifest(self) -> dict:
+        return _fm_runtime_distribution(self.repo_root).to_dict()
+
+    def get_fm_runtime_file(self, path: str) -> dict:
+        normalized = path.replace("\\", "/")
+        for file in _fm_runtime_files(self.repo_root):
+            if file.path == normalized:
+                return file.to_dict()
+        raise KeyError(f"fm runtime file not found: {path}")
+
+    def get_fm_runtime_bundle(self) -> dict:
+        return {
+            "distribution": _fm_runtime_distribution(self.repo_root).to_dict(),
+            "files": [file.to_dict() for file in _fm_runtime_files(self.repo_root)],
+        }
+
+    def get_fm_runtime_pip_package(self) -> dict:
+        return _fm_runtime_pip_package(self.repo_root).to_dict()
+
+    def check_fm_runtime_version(self, installed: dict[str, str] | None = None) -> dict:
+        installed = installed or {}
+        expected = {FM_RUNTIME_PACKAGE_ID: _fm_runtime_version(self.repo_root)}
+        results: list[dict[str, str | bool]] = []
+        overall_ok = True
+        for package_id, version in expected.items():
+            actual = installed.get(package_id)
+            ok = actual == version
+            if not ok:
+                overall_ok = False
+            status = "ok" if ok else "missing" if actual is None else "mismatch"
+            results.append(
+                {
+                    "package_id": package_id,
+                    "expected_version": version,
+                    "installed_version": actual or "",
+                    "status": status,
+                    "ok": ok,
+                }
+            )
+        return {
+            "ok": overall_ok,
+            "expected": expected,
+            "results": results,
+            "instructions": [
+                "Unlike client-side per-Skill tools, fetch and materialize the fm "
+                "runtime right after get_startup_context, before any Skill "
+                "routing, since Skill execution requires python -m fm skill run "
+                "immediately.",
+                "If ok is false, install the package returned by "
+                "get_fm_runtime_pip_package, or materialize files from "
+                "get_fm_runtime_bundle at the fm/ path in the client repository "
+                "root, before running python -m fm.",
+            ],
+        }
+
     def get_document_by_xid(
         self,
         xid: str,
@@ -440,8 +497,10 @@ class XRefCatalog:
             },
             context_injection_policy=_context_injection_policy(),
             session_context_deduplication=_session_context_deduplication(),
+            core_runtime_distribution=_fm_runtime_distribution(self.repo_root).to_dict(),
             client_instructions=[
                 "A client may call get_repository_identity as a content-free cache namespace preflight; get_startup_context remains the first governance-content load.",
+                "Fetch core_runtime_distribution (get_fm_runtime_bundle or get_fm_runtime_pip_package) immediately after this call, unconditionally. Unlike client_tool_download, this is not gated behind Skill selection: Skill execution requires python -m fm skill run right after a Skill is chosen.",
                 "Materialize and apply startup references in load_order before routing task-specific work. Applying a reference means enforcing its operational contract in the client runtime; it does not require injecting the full document body into the model prompt unless context_injection_policy requires it.",
                 "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
                 "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
@@ -848,6 +907,173 @@ def _client_tool_distribution(root: Path) -> ClientToolDistribution:
     )
 
 
+def _fm_runtime_version(root: Path) -> str:
+    init_path = root / "fm" / "__init__.py"
+    if not init_path.exists():
+        return "0.0.0"
+    match = FM_RUNTIME_VERSION_RE.search(read_text(init_path))
+    return match.group(1) if match else "0.0.0"
+
+
+def _fm_runtime_distribution(root: Path) -> ClientToolDistribution:
+    version = _fm_runtime_version(root)
+    package_versions = {FM_RUNTIME_PACKAGE_ID: version}
+    return ClientToolDistribution(
+        package_id=FM_RUNTIME_PACKAGE_ID,
+        version=version,
+        execution_location="client",
+        server_executes_tools=False,
+        install_layout="write each file to the same relative path under the client-side target repository root",
+        required_package_ids=sorted(package_versions),
+        package_versions=package_versions,
+        file_hash_algorithm="sha256",
+        version_check_tool="check_fm_runtime_version",
+        materialization={
+            "source": "xrefkit_mcp",
+            "file_tool": "get_fm_runtime_file",
+            "bundle_tool": "get_fm_runtime_bundle",
+            "pip_package_tool": "get_fm_runtime_pip_package",
+            "run_location": "client",
+            "preserve_relative_paths": True,
+        },
+        update_policy={
+            "check_on_startup": True,
+            "install_when_missing": True,
+            "update_when_version_mismatch": True,
+            "server_executes_tools": False,
+            "gated_by_skill_selection": False,
+            "fetch_timing": "immediately_after_get_startup_context",
+        },
+        files=[
+            ClientToolManifestEntry(
+                path=file.path,
+                kind=file.kind,
+                content_hash=file.content_hash,
+                size_bytes=file.size_bytes,
+                run_hint=file.run_hint,
+                resolver_tool="get_fm_runtime_file",
+                resolver_argument="path",
+            )
+            for file in _fm_runtime_files(root)
+        ],
+        instructions=[
+            "The MCP server only distributes these files; it must not execute them.",
+            "Unlike client_tool_download (tools/), this runtime is not gated "
+            "behind Skill selection: fetch it right after get_startup_context, "
+            "because Skill execution requires python -m fm skill run "
+            "immediately once a Skill is selected.",
+            "Install files at their returned relative paths, at fm/ in the "
+            "client-side repository root.",
+            "Run python -m fm on the client side with the client repository "
+            "root as the working directory.",
+            "This package depends on PyYAML; install it (get_fm_runtime_pip_package "
+            "does this automatically) or ensure PyYAML is already available "
+            "before running python -m fm.",
+        ],
+    )
+
+
+def _fm_runtime_files(root: Path) -> list[ClientToolFile]:
+    fm_root = root / "fm"
+    if not fm_root.exists():
+        return []
+    paths = sorted(fm_root.glob("**/*.py"))
+    readme = fm_root / "README.md"
+    if readme.exists():
+        paths = [*paths, readme]
+
+    result: list[ClientToolFile] = []
+    for path in paths:
+        rel = relative_to_repo(path, root)
+        text = read_text(path)
+        kind = _client_tool_kind(path)
+        result.append(
+            ClientToolFile(
+                path=rel,
+                kind=kind,
+                content=text,
+                content_hash=stable_hash(text),
+                size_bytes=len(text.encode("utf-8")),
+                run_hint="python -m fm" if kind == "python" else None,
+                imports=_python_imports(text) if kind == "python" else [],
+                links=markdown_xid_link_targets(text),
+            )
+        )
+    return result
+
+
+def _fm_runtime_pip_package(root: Path) -> ClientToolPipPackage:
+    files = _fm_runtime_files(root)
+    version = _fm_runtime_version(root)
+    package_root = f"{FM_RUNTIME_PACKAGE_ID}-{version}"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            f"{package_root}/pyproject.toml",
+            _fm_runtime_pyproject(version),
+        )
+        archive.writestr(
+            f"{package_root}/README.md",
+            _fm_runtime_readme(),
+        )
+        for file in files:
+            archive.writestr(f"{package_root}/{file.path}", file.content)
+    content = buffer.getvalue()
+    encoded = base64.b64encode(content).decode("ascii")
+    return ClientToolPipPackage(
+        filename=f"{package_root}.zip",
+        package_id=FM_RUNTIME_PACKAGE_ID,
+        version=version,
+        package_format="zip-sdist",
+        install_command=f"python -m pip install {package_root}.zip",
+        content_base64=encoded,
+        content_hash=hashlib_sha256_bytes(content),
+        size_bytes=len(content),
+        warnings=[
+            "This package installs a top-level fm package; install it in a "
+            "project virtual environment to avoid conflicts with any "
+            "unrelated package named fm.",
+            "The MCP server only distributes the package; python -m fm "
+            "execution is client-side.",
+        ],
+    )
+
+
+def _fm_runtime_pyproject(version: str) -> str:
+    return f"""[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{FM_RUNTIME_PACKAGE_ID}"
+version = "{version}"
+description = "XRefKit fm skill-execution runtime distributed from XRefKit MCP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6.0.2,<7"]
+
+[tool.setuptools.packages.find]
+include = ["fm*"]
+"""
+
+
+def _fm_runtime_readme() -> str:
+    return """# XRefKit fm Runtime
+
+This package is generated by XRefKit MCP and installs the `fm` package that
+implements XRefKit's Skill-execution runtime (`python -m fm skill run`,
+`workitem`, `artifact`, `concern`, `phase`, `verify`, `close`) for client-side
+execution.
+
+The MCP server does not execute `fm`. Run it in the client-side target
+repository:
+
+```powershell
+python -m fm skill run --meta <path-to-meta.md> --task "<task>" --json
+```
+"""
+
+
 def _client_obligations() -> list[ClientObligation]:
     return [
         ClientObligation(
@@ -878,6 +1104,26 @@ def _client_obligations() -> list[ClientObligation]:
                 "get_client_tool_bundle, and get_client_tool_pip_package reject "
                 "the call for any MCP session that has not first called "
                 "get_skill or get_skill_requirements"
+            ),
+        ),
+        ClientObligation(
+            id="core_runtime.fetch_immediately",
+            level="must",
+            applies_when="xrefkit_mcp_configured",
+            statement=(
+                "Fetch and materialize the fm runtime from "
+                "core_runtime_distribution right after get_startup_context, "
+                "unconditionally, rather than deferring it the way per-Skill "
+                "client-tool distribution is deferred. Skill execution "
+                "requires python -m fm skill run immediately once a Skill is "
+                "selected, so the runtime must already be available by then."
+            ),
+            enforcement_owner="client",
+            verification=(
+                "python -m fm succeeds in the client-side target repository, "
+                "or fm/ files materialized from get_fm_runtime_bundle are "
+                "present, before the client's first get_skill call in the "
+                "session"
             ),
         ),
         ClientObligation(
