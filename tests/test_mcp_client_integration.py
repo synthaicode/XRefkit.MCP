@@ -41,6 +41,16 @@ class McpClientIntegrationTests(unittest.TestCase):
                         identity["repository_fingerprint"],
                     )
 
+                    rejected_result = await session.call_tool(
+                        "get_document_by_xid",
+                        {"xid": "8A666C1FD121"},
+                    )
+                    self.assertTrue(rejected_result.isError)
+                    self.assertIn(
+                        "XREFKIT_STARTUP_REQUIRED",
+                        rejected_result.content[0].text,
+                    )
+
                     startup_result = await session.call_tool("get_startup_context", {})
                     startup = startup_result.structuredContent
                     self.assertEqual(
@@ -118,6 +128,7 @@ class McpClientIntegrationTests(unittest.TestCase):
                         identity["repository_fingerprint"],
                     )
                     self.assertGreater(len(startup_doc["content"]), 1000)
+                    self.assertIn("control_reminder", startup_doc)
                     cached_doc_result = await session.call_tool(
                         "get_document_by_xid",
                         {

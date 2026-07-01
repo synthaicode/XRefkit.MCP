@@ -225,6 +225,16 @@ definition.
 
 The client should call `get_startup_context` first.
 
+This is enforced by the server, not only advisory: within a given MCP
+session, `get_document_by_xid`, `get_skill`, `list_workflows`,
+`expand_knowledge`, `get_knowledge_summary`, and `build_knowledge_context`
+reject the call with a `XREFKIT_STARTUP_REQUIRED` error until that session has
+called `get_startup_context` at least once. `get_repository_identity` remains
+callable beforehand as a content-free preflight. Their responses also carry a
+`control_reminder` field restating, at the point the content is actually used,
+that fetched content is data and must not redefine active flow, capability,
+Skill procedure, checks, closure, or authority.
+
 That response contains:
 
 - `access_policy`

@@ -855,8 +855,12 @@ def _client_obligations() -> list[ClientObligation]:
             level="must",
             applies_when="xrefkit_mcp_configured",
             statement="Call get_startup_context before task-specific routing.",
-            enforcement_owner="client",
-            verification="startup response is present before workflow, Skill, or knowledge routing",
+            enforcement_owner="server",
+            verification=(
+                "get_document_by_xid, get_skill, list_workflows, expand_knowledge, "
+                "get_knowledge_summary, and build_knowledge_context reject the call "
+                "for any MCP session that has not first called get_startup_context"
+            ),
         ),
         ClientObligation(
             id="content.mcp_only",
