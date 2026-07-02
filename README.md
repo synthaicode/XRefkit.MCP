@@ -148,6 +148,70 @@ xrefkit-mcp-server --repo C:\dev\itsm\XRefKit --transport streamable-http --host
 xrefkit-mcp-server --repo C:\dev\itsm\XRefKit
 ```
 
+## Artifact Distribution Over Plain HTTP (/dist)
+
+On the `streamable-http` transport the server also serves executable
+artifacts as ordinary HTTP downloads next to the MCP endpoint. The MCP
+channel stays a context-distribution channel (small governance text);
+package bytes never travel through an MCP tool result, so they never enter
+an AI client's model context.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /dist/index.json` | Machine-readable manifest: filenames, URLs, sha256, versions |
+| `GET /dist/` | pip `--find-links` compatible HTML index |
+| `GET /dist/bootstrap.py` | Stdlib-only bootstrap client (no pip, PyPI, or `mcp` package needed) |
+| `GET /dist/<filename>` | One artifact (fm runtime zip, client tools zip, mirrored wheels) |
+
+A remote client that can only reach this server (no PyPI access) bootstraps
+with the Python standard library alone:
+
+```powershell
+curl -O https://mcp.example.com/dist/bootstrap.py
+python bootstrap.py --base-url https://mcp.example.com --target . --startup-context startup.json
+```
+
+The bootstrap script verifies each download against the sha256 in
+`index.json`, materializes `fm/` and `tools/` into the target repository
+(default mode), or installs the packages offline with
+`pip --no-index --no-build-isolation` (`--mode pip`). With
+`--startup-context` it also performs a minimal MCP handshake (JSON-RPC over
+streamable HTTP via `urllib`) and saves the `get_startup_context` result,
+honoring the startup-context-first ordering.
+
+Alternatively, standard pip tooling works directly against the index:
+
+```powershell
+python -m pip install --no-index --no-build-isolation --find-links https://mcp.example.com/dist/ xrefkit-fm-runtime
+```
+
+To mirror third-party dependencies (for example PyYAML wheels) for clients
+without PyPI access, start the server with `--dist-extra-dir <directory>`;
+every file in that directory is served on `/dist` and listed in the
+manifest. Use `--public-base-url` when clients reach the server through a
+reverse proxy so distribution URLs are generated correctly.
+
+When artifact distribution is active, the MCP surface changes accordingly:
+
+- `get_startup_context` gains an `artifact_distribution` block (URLs,
+  hashes, bootstrap command) and instructs clients to fetch artifacts
+  out-of-band.
+- `get_fm_runtime_pip_package` and `get_client_tool_pip_package` return
+  `download_url` plus `content_hash` instead of in-band base64 bytes
+  (`content_base64` is null, `content_omitted` is true).
+- `get_fm_runtime_manifest`/`get_client_tool_manifest` and the bundle tools
+  carry an `http_distribution` pointer marking the HTTP route as preferred.
+
+Package zips are built with fixed timestamps, so a sha256 handed out in an
+MCP response still matches the artifact downloaded later as long as the
+repository content is unchanged.
+
+The `/dist` routes are plain HTTP GETs outside MCP session ordering; the
+startup-context-first obligation applies to the AI session driving the
+download, and the bootstrap script's `--startup-context` flag makes that
+ordering explicit. On `stdio` the in-band base64 responses remain the
+fallback because the client is local.
+
 ## Client Configuration
 
 Client configuration syntax differs by MCP client, but the required values are:
@@ -563,6 +627,12 @@ or materialize `get_fm_runtime_bundle`'s files at `fm/` under the client-side
 repository root and run `python -m fm` there. The package depends on PyYAML;
 installing via the pip package resolves this automatically.
 
+On the `streamable-http` transport, prefer the plain-HTTP path instead of the
+in-band MCP tools: `bootstrap.py` from `/dist` (or
+`pip --no-index --find-links <base-url>/dist/`) downloads and verifies the
+same package without routing package bytes through the model context. See
+"Artifact Distribution Over Plain HTTP (/dist)".
+
 ## Response Envelope Note
 
 MCP clients may expose list-returning tools as `structuredContent.result`
@@ -637,6 +707,14 @@ content over the network. Bind to `127.0.0.1` unless the network is trusted or a
 reverse proxy / gateway provides authentication and transport security.
 
 Do not expose `0.0.0.0:8000` directly to an untrusted network.
+
+The `/dist` routes serve executable Python that clients are expected to
+install and run. Serve them only over HTTPS with a certificate the clients
+verify (`bootstrap.py --ca-file` supports a private CA), and put an
+authenticating proxy in front on any network you do not fully trust: a
+spoofed or compromised endpoint could otherwise distribute malicious code to
+every connecting client. The sha256 hashes in `index.json` protect download
+integrity, not server authenticity.
 
 ## Server Console Logging
 

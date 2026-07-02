@@ -909,6 +909,12 @@ def _client_tool_distribution(root: Path) -> ClientToolDistribution:
             "Run Python tools on the client side with the client repository root as the working directory.",
             "Some tools expect sibling tools modules, so preserve the returned directory layout.",
             "Some tools call external programs such as git, dotnet, npm, or project-specific commands; satisfy those prerequisites on the client side before execution.",
+            "Tools that consume tools/structure_graph output need its C# "
+            "binary, which is not distributed here; install the NuGet dotnet "
+            "tool XRefKit.StructureGraph, or see "
+            "docs/guides/078_structure_graph_build_guide.md (xid "
+            "8B3E5D0A94C7) for build-from-source and precomputed-JSON "
+            "alternatives.",
             "This distribution also includes Skill-embedded scripts under skills/**/*.py that a Skill's SKILL.md instructs running directly by relative path (e.g. skills/<id>/scripts/*.py). get_client_tool_pip_package's tools/-only package does not include these; use get_client_tool_file or get_client_tool_bundle for them.",
         ],
     )
@@ -1015,16 +1021,18 @@ def _fm_runtime_pip_package(root: Path) -> ClientToolPipPackage:
     package_root = f"{FM_RUNTIME_PACKAGE_ID}-{version}"
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
+        _zip_writestr(
+            archive,
             f"{package_root}/pyproject.toml",
             _fm_runtime_pyproject(version),
         )
-        archive.writestr(
+        _zip_writestr(
+            archive,
             f"{package_root}/README.md",
             _fm_runtime_readme(),
         )
         for file in files:
-            archive.writestr(f"{package_root}/{file.path}", file.content)
+            _zip_writestr(archive, f"{package_root}/{file.path}", file.content)
     content = buffer.getvalue()
     encoded = base64.b64encode(content).decode("ascii")
     return ClientToolPipPackage(
@@ -1458,20 +1466,23 @@ def _client_tool_pip_package(root: Path) -> ClientToolPipPackage:
     package_root = f"xrefkit-client-tools-{CLIENT_TOOL_PACKAGE_VERSION}"
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
+        _zip_writestr(
+            archive,
             f"{package_root}/pyproject.toml",
             _client_tools_pyproject(files),
         )
-        archive.writestr(
+        _zip_writestr(
+            archive,
             f"{package_root}/README.md",
             _client_tools_readme(),
         )
-        archive.writestr(
+        _zip_writestr(
+            archive,
             f"{package_root}/tools/__init__.py",
             '"""Client-side XRefKit deterministic tools."""\n',
         )
         for file in files:
-            archive.writestr(f"{package_root}/{file.path}", file.content)
+            _zip_writestr(archive, f"{package_root}/{file.path}", file.content)
     content = buffer.getvalue()
     encoded = base64.b64encode(content).decode("ascii")
     return ClientToolPipPackage(
@@ -1486,7 +1497,12 @@ def _client_tool_pip_package(root: Path) -> ClientToolPipPackage:
         warnings=[
             "This package installs a top-level tools package to preserve existing XRefKit imports such as tools.error_policy_locator.",
             "Install in a project virtual environment to avoid conflicts with any unrelated package named tools.",
-            "The package contains Python tools only; C# tools/structure_graph is not bundled.",
+            "The package contains Python tools only; C# tools/structure_graph "
+            "is not bundled. Install it as the NuGet dotnet tool "
+            "XRefKit.StructureGraph (command dotnet-xrefkit-graph), build it "
+            "from source, or receive precomputed graph JSON; see "
+            "docs/guides/078_structure_graph_build_guide.md (resolve via "
+            "get_document_by_xid with xid 8B3E5D0A94C7).",
             "The MCP server only distributes the package; tool execution is client-side.",
             "Skill-embedded scripts under skills/**/*.py are not included in this "
             "package. Fetch them with get_client_tool_file or "
@@ -1544,6 +1560,17 @@ xrefkit-cs-scope-probe --target .
 Some tools require external programs such as git, dotnet, npm, or precomputed
 `tools/structure_graph` output.
 """
+
+
+def _zip_writestr(archive: zipfile.ZipFile, name: str, content: str) -> None:
+    # Fixed timestamp keeps rebuilt package bytes identical for identical
+    # inputs, so a sha256 handed out earlier (for example in an MCP response
+    # pointing at the HTTP /dist endpoint) still matches the artifact built
+    # at download time.
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o644 << 16
+    archive.writestr(info, content)
 
 
 def hashlib_sha256_bytes(content: bytes) -> str:
