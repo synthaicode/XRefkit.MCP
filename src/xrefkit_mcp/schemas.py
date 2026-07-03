@@ -95,6 +95,16 @@ class SkillCatalogEntry:
     path: str
     meta_path: str
     context_size: dict[str, Any]
+    # Skill-centric consolidation (design 083/084): the capability/tuning/
+    # responsibility triad is the Skill meta identity and routing vocabulary,
+    # and preconditions/knowledge_slots are the declared needs that replace
+    # capability_refs binding and static knowledge_refs. Surfaced as an additive
+    # superset; empty until skill metas migrate to the new fields.
+    capability: str = ""
+    tuning: str = ""
+    responsibility: str = ""
+    preconditions: list[str] = field(default_factory=list)
+    knowledge_slots: list[dict[str, Any]] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     zone_metadata: dict[str, Any] = field(default_factory=dict)
 

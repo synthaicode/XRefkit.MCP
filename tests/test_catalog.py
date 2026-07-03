@@ -534,6 +534,131 @@ Duplicate body.
             {"SKILLMETA", "SKILLDOC"},
         )
 
+    def test_surfaces_triad_preconditions_and_knowledge_slots(self) -> None:
+        # Skill-centric consolidation (design 083/084): the catalog surfaces the
+        # capability/tuning/responsibility triad and declared needs as an
+        # additive superset. `responsibility` is the explicit field that
+        # replaces role_responsibilities.executor.
+        write(
+            self.repo / "skills" / "triad_sample" / "meta.md",
+            """<!-- xid: TRIADMETA -->
+# Skill Meta: triad_sample
+
+- skill_id: `triad_sample`
+- summary: review with the new triad fields
+- maturity: `trial`
+- capability: software_development
+- tuning: C#
+- responsibility: quality check
+- preconditions:
+  - implemented code exists
+  - design evidence exists
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "triad_sample" / "SKILL.md",
+            "<!-- xid: TRIADDOC -->\n# Skill: triad_sample\n",
+        )
+
+        catalog = XRefCatalog.build(self.repo)
+        skill = next(
+            entry for entry in catalog.list_skills() if entry["skill_id"] == "triad_sample"
+        )
+
+        self.assertEqual(skill["capability"], "software_development")
+        self.assertEqual(skill["tuning"], "C#")
+        self.assertEqual(skill["responsibility"], "quality check")
+        self.assertIn("implemented code exists", skill["preconditions"])
+        self.assertEqual(skill["knowledge_slots"], [])
+
+        legacy = next(
+            entry for entry in catalog.list_skills() if entry["skill_id"] == "sample_review"
+        )
+        self.assertEqual(legacy["capability"], "")
+        self.assertEqual(legacy["knowledge_slots"], [])
+
+    def test_resolve_skill_knowledge_resolves_slots(self) -> None:
+        # Design 082 D3 / 084 M5: slots declare needs (query or pinned bind XID)
+        # resolved dynamically over the base+local knowledge catalog.
+        write(
+            self.repo / "skills" / "slot_sample" / "meta.md",
+            """<!-- xid: SLOTMETA -->
+# Skill Meta: slot_sample
+
+- skill_id: `slot_sample`
+- summary: skill with knowledge slots
+- maturity: `trial`
+- capability: software_development
+- responsibility: quality check
+- knowledge_slots:
+  - name=context; query=context rules external input; domain=organization; min=1; required
+  - name=context_pin; bind=ABC123
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "slot_sample" / "SKILL.md",
+            "<!-- xid: SLOTDOC -->\n# Skill: slot_sample\n",
+        )
+
+        catalog = XRefCatalog.build(self.repo)
+        result = catalog.resolve_skill_knowledge("slot_sample")
+
+        self.assertEqual(result["skill_id"], "slot_sample")
+        self.assertEqual(len(result["slots"]), 2)
+
+        query_slot = result["slots"][0]
+        self.assertEqual(query_slot["slot"], "context")
+        self.assertTrue(query_slot["required"])
+        self.assertEqual(query_slot["domain"], "organization")
+        self.assertTrue(query_slot["satisfied"])
+        self.assertTrue(
+            any(candidate["xid"] == "ABC123" for candidate in query_slot["candidates"])
+        )
+
+        bind_slot = result["slots"][1]
+        self.assertEqual(bind_slot["bind"], "ABC123")
+        self.assertEqual(bind_slot["candidates"][0]["xid"], "ABC123")
+
+        self.assertEqual(result["unsatisfied_required"], [])
+
+    def test_rank_skills_uses_triad_facets_and_reports_preconditions(self) -> None:
+        # Design 084 M4: the triad is the routing vocabulary; declared
+        # preconditions travel with the ranking.
+        write(
+            self.repo / "skills" / "triad_rank" / "meta.md",
+            """<!-- xid: TRIADRANKMETA -->
+# Skill Meta: triad_rank
+
+- skill_id: `triad_rank`
+- summary: triad-routed review skill
+- maturity: `trial`
+- capability: software_development
+- tuning: C#
+- responsibility: quality check
+- preconditions:
+  - implemented code exists
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "triad_rank" / "SKILL.md",
+            "<!-- xid: TRIADRANKDOC -->\n# Skill: triad_rank\n",
+        )
+
+        catalog = XRefCatalog.build(self.repo)
+        ranked = catalog.rank_skills_for_purpose("software_development C# quality check")
+        entry = next(item for item in ranked if item["skill_id"] == "triad_rank")
+
+        facet_labels = {facet.split("=", 1)[0] for facet in entry["matched_facets"]}
+        self.assertIn("capability", facet_labels)
+        self.assertIn("tuning", facet_labels)
+        self.assertIn(
+            "implemented code exists",
+            entry["execution_readiness"]["declared_preconditions"],
+        )
+
     def test_rejects_server_tool_with_side_effects(self) -> None:
         contract = ToolContract(
             tool_id="bad.write",

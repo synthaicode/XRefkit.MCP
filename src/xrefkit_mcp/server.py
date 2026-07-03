@@ -268,6 +268,11 @@ def main(argv: list[str] | None = None) -> int:
         return _with_control_reminder(result)
 
     @app.tool()
+    def resolve_skill_knowledge(ctx: Context, skill_id: str) -> dict[str, Any]:
+        _require_startup_loaded(ctx, "resolve_skill_knowledge")
+        return _with_control_reminder(catalog.resolve_skill_knowledge(skill_id))
+
+    @app.tool()
     def rank_skills_for_purpose(purpose: str, limit: int = 5) -> list[dict[str, Any]]:
         return catalog.rank_skills_for_purpose(purpose, limit)
 

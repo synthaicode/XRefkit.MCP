@@ -292,6 +292,60 @@ class XRefCatalog:
             "missing": entry.missing,
         }
 
+    def resolve_skill_knowledge(self, skill_id: str) -> dict:
+        """Resolve a Skill's declared ``knowledge_slots`` against the base+local
+        unified catalog (design 082 Decision 3 / 084 M5).
+
+        Each slot declares a need — a ``query`` or a pinned ``bind`` XID — plus
+        acceptance metadata (``min``, ``domain``, ``required``). Selection is
+        dynamic (ranked over the merged base+local knowledge roots); the slot
+        definition stays in the Skill meta. Returns ranked candidates and
+        per-slot satisfaction so planning/routing can gate on required slots.
+        Empty ``slots`` for a Skill that has not declared any yet.
+        """
+        entry = self._skill_by_id(skill_id)
+        knowledge = self.knowledge
+        by_xid = {item.xid: item for item in knowledge}
+        resolved: list[dict] = []
+        for slot in entry.knowledge_slots:
+            name = slot.get("slot") or slot.get("name")
+            bind = slot.get("bind")
+            domain = slot.get("domain")
+            min_count = _slot_int(slot.get("min"), 0)
+            required = _slot_bool(slot.get("required"))
+            if bind:
+                match = by_xid.get(str(bind))
+                query = None
+                candidates = [match.to_dict()] if match else []
+            else:
+                query = str(slot.get("query") or name or "")
+                ranked = _rank_entries(query, knowledge)
+                if domain:
+                    ranked = [item for item in ranked if item.domain == domain]
+                candidates = [item.to_dict() for item in ranked[: _slot_int(slot.get("limit"), 5)]]
+            satisfied = len(candidates) >= max(min_count, 1) if required else True
+            resolved.append(
+                {
+                    "slot": name,
+                    "query": query,
+                    "bind": str(bind) if bind else None,
+                    "domain": domain,
+                    "min": min_count,
+                    "required": required,
+                    "candidates": candidates,
+                    "satisfied": satisfied,
+                }
+            )
+        return {
+            "skill_id": entry.skill_id,
+            "slots": resolved,
+            "unsatisfied_required": [
+                slot["slot"]
+                for slot in resolved
+                if slot["required"] and not slot["satisfied"]
+            ],
+        }
+
     def rank_skills_for_purpose(self, purpose: str, limit: int = 5) -> list[dict]:
         query_tokens = _tokens(purpose)
         results: list[SkillRankResult] = []
@@ -306,6 +360,11 @@ class XRefCatalog:
                 ("applies_when", skill.applies_when, 0.2),
                 ("summary", [skill.summary], 0.2),
                 ("inputs", skill.inputs, 0.1),
+                # Skill-centric consolidation (084 M4): the triad is the routing
+                # vocabulary. Empty for un-migrated skills, so this is additive.
+                ("capability", [skill.capability], 0.2),
+                ("tuning", [skill.tuning], 0.2),
+                ("responsibility", [skill.responsibility], 0.2),
             ]:
                 matched = _matched_values(query_tokens, values)
                 if matched:
@@ -325,7 +384,15 @@ class XRefCatalog:
                 for item in skill.required_tools
                 if item.get("tool_id") and item.get("tool_id") not in available_tools
             ]
-            readiness = {"runnable": not missing_tools, "missing_tool_contracts": missing_tools}
+            # Declared preconditions travel with the ranking so the client can
+            # filter to Skills runnable in the current state (084 M4). Empty
+            # until metas adopt preconditions; tool-availability stays the only
+            # server-known readiness signal.
+            readiness = {
+                "runnable": not missing_tools,
+                "missing_tool_contracts": missing_tools,
+                "declared_preconditions": skill.preconditions,
+            }
             results.append(
                 SkillRankResult(
                     skill_id=skill.skill_id,
@@ -1011,9 +1078,77 @@ def _build_skill_entry(root: Path, ownership: Ownership | None, meta_path: Path)
             scalar_list(meta, "output"),
             closure,
         ),
+        # Skill-centric consolidation (083/084): surface the triad and declared
+        # needs as an additive superset. `responsibility` is the new explicit
+        # field that replaces role_responsibilities.executor (which was always a
+        # responsibility, not a role). Empty where a meta has not adopted the new
+        # fields yet; the legacy nested bullets stay opaque in meta_content.
+        capability=str(meta.get("capability") or ""),
+        tuning=str(meta.get("tuning") or ""),
+        responsibility=str(meta.get("responsibility") or ""),
+        preconditions=scalar_list(meta, "preconditions"),
+        knowledge_slots=_parse_knowledge_slots(meta),
         missing=missing,
         zone_metadata=_zone_metadata(ownership, rel_meta),
     )
+
+
+def _slot_int(value: object, default: int = 0) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _slot_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
+
+
+def _parse_slot_spec(spec: str) -> dict:
+    """Parse a compact meta slot spec that the bullet parser can carry.
+
+    Interim markdown form (until the meta schema settles in the XRefKit-side
+    migration): `name=<slot>; query=<text>; domain=<d>; min=<n>; required;
+    bind=<xid>`. Fields are `;`-separated `key=value` pairs (a bare token means
+    `token=true`), so a `query` may contain spaces. `name` normalizes to `slot`.
+    """
+    slot: dict = {}
+    for field_text in spec.split(";"):
+        field_text = field_text.strip()
+        if not field_text:
+            continue
+        if "=" in field_text:
+            key, _, val = field_text.partition("=")
+            key, val = key.strip(), val.strip()
+        else:
+            key, val = field_text, "true"
+        slot[key] = val
+    if "name" in slot and "slot" not in slot:
+        slot["slot"] = slot.pop("name")
+    return slot
+
+
+def _parse_knowledge_slots(meta: dict) -> list[dict]:
+    """Normalize declared knowledge slots (design 082 Decision 3).
+
+    Slots are the meta-declared knowledge needs that replace static
+    knowledge_refs; each is resolved at runtime against the base+local catalog.
+    Tolerant during the transition: returns [] when a meta has not adopted
+    knowledge_slots yet, parses compact string specs, and passes mapping entries
+    through unchanged.
+    """
+    value = meta.get("knowledge_slots")
+    if not isinstance(value, list):
+        return []
+    slots: list[dict] = []
+    for item in value:
+        if isinstance(item, dict):
+            slots.append(dict(item))
+        elif isinstance(item, str) and item.strip():
+            slots.append(_parse_slot_spec(item))
+    return slots
 
 
 def _build_skills(root: Path, ownership: Ownership | None = None) -> list[SkillCatalogEntry]:
@@ -1113,12 +1248,12 @@ def _client_tool_distribution(root: Path) -> ClientToolDistribution:
             "Run Python tools on the client side with the client repository root as the working directory.",
             "Some tools expect sibling tools modules, so preserve the returned directory layout.",
             "Some tools call external programs such as git, dotnet, npm, or project-specific commands; satisfy those prerequisites on the client side before execution.",
-            "Tools that consume tools/structure_graph output need its C# "
-            "binary, which is not distributed here; install the NuGet dotnet "
-            "tool XRefKit.StructureGraph, or see "
-            "docs/guides/078_structure_graph_build_guide.md (xid "
-            "8B3E5D0A94C7) for build-from-source and precomputed-JSON "
-            "alternatives.",
+            "structure_graph is an analysis/build-side tool, not a baseline "
+            "client dependency: the client consumes its output as findings "
+            "knowledge, not the tool. If a specific Skill needs structure_graph "
+            "client-side, that Skill declares and provisions it (Skill-scoped, "
+            "prompt-supplemented); XRefKit.StructureGraph is not a global client "
+            "requirement.",
             "This distribution also includes Skill-embedded scripts under skills/**/*.py that a Skill's SKILL.md instructs running directly by relative path (e.g. skills/<id>/scripts/*.py). get_client_tool_pip_package's tools/-only package does not include these; use get_client_tool_file or get_client_tool_bundle for them.",
         ],
     )
