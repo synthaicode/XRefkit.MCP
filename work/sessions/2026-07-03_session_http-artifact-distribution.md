@@ -92,6 +92,20 @@ CLI flag flipped from --exclude-content to --include-content; obligation
 verification text and README updated; catalog + integration tests added
 (80 total pass).
 
+Follow-up event (same day, pack drift detection): the startup contract
+pack can no longer drift silently. Canonical pack body moved to the
+XRefKit repository (docs/core/contracts/079_startup_contract_pack.md, xid
+D4E8A1C63B57) so pack and sources are authored/reviewed in the same
+commit; the doc declares based_on_hashes (source hashes at authoring
+time). The server serves that doc when present (pack_source
+repository_document) or the embedded body as fallback (embedded_fallback,
+now also carrying based_on hashes), and on every get_startup_context
+compares based_on_hashes with live source_hashes: mismatches set
+stale/stale_sources and append a client instruction to prefer live
+sources by XID and escalate. New CLI: startup-pack-hashes (regenerate
+hash lines) and check-startup-pack (CI gate, exit 1 when stale). Real
+repo verified stale=false; 84 tests pass (4 new drift tests).
+
 ## Decision
 
 Human accepted the proposal: MCP channel = governance context only; plain
@@ -106,12 +120,15 @@ bytes must not consume model context; clients may reach only the MCP server
 
 ## Deferred
 
-- Startup contract pack drift detection (`based_on_hashes` or moving the
-  pack body into the XRefKit repo).
-- Authentication in front of `/dist` (currently TLS + reverse proxy
-  guidance only, documented in README Security Notes).
-- (Resolved later the same day: expand_knowledge freshness fix and
-  list_skills default/gating — see follow-up events above.)
+- (Closed by decision, same day: built-in authentication for /mcp and
+  /dist will NOT be implemented. Human decision: this server is not
+  universal — it supplies domain knowledge for very local use, so the
+  security boundary is delegated to operations (network placement,
+  reverse proxy when needed). README Security Notes now state this scope
+  explicitly.)
+- (Resolved later the same day: expand_knowledge freshness fix,
+  list_skills default/gating, and startup-pack drift detection — see
+  follow-up events above.)
 
 ## Open
 

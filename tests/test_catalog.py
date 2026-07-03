@@ -795,3 +795,135 @@ Edited summary paragraph.
                 expanded["entry"]["content_hash"],
                 hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
             )
+
+
+class StartupPackDriftTests(unittest.TestCase):
+    """The startup contract pack must report drift against its sources."""
+
+    STARTUP_DOCS = [
+        ("agent/000_agent_entry.md", "0B5C58B5E5B2", "Agent Entry"),
+        ("docs/core/models/017_base_and_xref_layering.md", "5A1C8E4D2F90", "Base Layers"),
+        ("docs/core/contracts/011_startup_xref_routing.md", "6C0B62D6366A", "Startup Routing"),
+        ("docs/core/contracts/016_uncertainty_protocol.md", "8A666C1FD121", "Uncertainty"),
+        ("docs/core/contracts/053_context_direction_security_guard.md", "A7F3C92D4E11", "Guard"),
+        ("docs/core/contracts/015_shared_memory_operations.md", "4A423E72D2ED", "Shared Memory"),
+    ]
+    PACK_DOC_PATH = "docs/core/contracts/079_startup_contract_pack.md"
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp_dir.name)
+        for rel_path, xid, title in self.STARTUP_DOCS:
+            write(
+                self.repo / rel_path,
+                f"<!-- xid: {xid} -->\n<a id=\"xid-{xid}\"></a>\n\n# {title}\n\nBody of {title}.\n",
+            )
+        self.catalog = XRefCatalog.build(self.repo)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _write_pack_doc(self, based_on: dict[str, str]) -> None:
+        hash_lines = "\n".join(f"- {xid}: `{value}`" for xid, value in based_on.items())
+        write(
+            self.repo / self.PACK_DOC_PATH,
+            f"""<!-- xid: D4E8A1C63B57 -->
+<a id="xid-D4E8A1C63B57"></a>
+
+# Startup Contract Pack v1
+
+## Based On
+
+- pack_version: 1
+{hash_lines}
+
+## Global startup invariants
+
+- Pack body authored from the sources above.
+""",
+        )
+
+    def test_missing_pack_doc_falls_back_and_reports_stale(self) -> None:
+        context = self.catalog.get_startup_context()
+        pack = context["startup_contract_pack"]
+
+        self.assertEqual(pack["pack_source"], "embedded_fallback")
+        self.assertIsNone(pack["pack_doc_xid"])
+        self.assertTrue(pack["stale"])
+        self.assertEqual(len(pack["stale_sources"]), 6)
+        self.assertEqual(
+            pack["pack_hash"],
+            hashlib.sha256(pack["body"].encode("utf-8")).hexdigest(),
+        )
+        self.assertTrue(
+            any(
+                "startup_contract_pack is STALE" in instruction
+                for instruction in context["client_instructions"]
+            )
+        )
+
+    def test_repo_pack_doc_with_matching_hashes_is_not_stale(self) -> None:
+        live_hashes = self.catalog.get_startup_context()["startup_contract_pack"][
+            "source_hashes"
+        ]
+        self._write_pack_doc(live_hashes)
+
+        context = self.catalog.get_startup_context()
+        pack = context["startup_contract_pack"]
+
+        self.assertEqual(pack["pack_source"], "repository_document")
+        self.assertEqual(pack["pack_doc_xid"], "D4E8A1C63B57")
+        self.assertFalse(pack["stale"])
+        self.assertEqual(pack["stale_sources"], [])
+        self.assertEqual(pack["pack_version"], 1)
+        self.assertEqual(pack["based_on_hashes"], live_hashes)
+        self.assertIn("Pack body authored from the sources above.", pack["body"])
+        self.assertEqual(
+            pack["pack_hash"],
+            hashlib.sha256(pack["body"].encode("utf-8")).hexdigest(),
+        )
+        self.assertFalse(
+            any(
+                "startup_contract_pack is STALE" in instruction
+                for instruction in context["client_instructions"]
+            )
+        )
+
+    def test_source_edit_after_pack_authoring_flags_exactly_that_source(self) -> None:
+        live_hashes = self.catalog.get_startup_context()["startup_contract_pack"][
+            "source_hashes"
+        ]
+        self._write_pack_doc(live_hashes)
+        rel_path, xid, title = self.STARTUP_DOCS[3]
+        write(
+            self.repo / rel_path,
+            f"<!-- xid: {xid} -->\n<a id=\"xid-{xid}\"></a>\n\n# {title}\n\nRevised body.\n",
+        )
+
+        context = self.catalog.get_startup_context()
+        pack = context["startup_contract_pack"]
+
+        self.assertTrue(pack["stale"])
+        self.assertEqual([item["xid"] for item in pack["stale_sources"]], [xid])
+        self.assertEqual(
+            pack["stale_sources"][0]["based_on_hash"], live_hashes[xid]
+        )
+        self.assertNotEqual(
+            pack["stale_sources"][0]["live_hash"], live_hashes[xid]
+        )
+        self.assertTrue(
+            any(
+                xid in instruction and "STALE" in instruction
+                for instruction in context["client_instructions"]
+            )
+        )
+
+    def test_parse_helpers(self) -> None:
+        from xrefkit_mcp.startup_contract_pack import (
+            parse_based_on_hashes,
+            parse_pack_version,
+        )
+
+        text = "- pack_version: 3\n- 0B5C58B5E5B2: `" + "a" * 64 + "`\n- not a hash line\n"
+        self.assertEqual(parse_pack_version(text), 3)
+        self.assertEqual(parse_based_on_hashes(text), {"0B5C58B5E5B2": "a" * 64})

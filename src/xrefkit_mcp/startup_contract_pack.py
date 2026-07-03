@@ -1,6 +1,48 @@
 from __future__ import annotations
 
 import hashlib
+import re
+
+
+# XID of the canonical pack document in the served XRefKit repository
+# (docs/core/contracts/079_startup_contract_pack.md). When that document
+# exists, it is the authoritative pack body and carries its own
+# based_on_hashes; the module-level body below is only a fallback for
+# repositories that do not carry the pack document yet.
+STARTUP_CONTRACT_PACK_XID = "D4E8A1C63B57"
+
+# The live source hashes the embedded fallback body below was written
+# against (stable_hash of the xid-normalized source documents). The server
+# compares these with the live hashes on every get_startup_context call and
+# reports the pack as stale when they diverge, so a hand-maintained copy can
+# no longer drift silently.
+EMBEDDED_BASED_ON_HASHES = {
+    "0B5C58B5E5B2": "c3a49d6455968ea7028ed5fba8dc851605f70c7539abee5bf28d56169a54f591",
+    "5A1C8E4D2F90": "5a5d24dde57f44cbac1c75065389c71575a5ef76890026f94cd74e2e5c4a4666",
+    "6C0B62D6366A": "6075edb9282af4e376f05a955cbe752515127593cbf6a0354d78b84df9481a6a",
+    "8A666C1FD121": "34f8d7b18462e5320a54c4a259090bfe118fc23b666c4866714bc5adbd7d4e94",
+    "A7F3C92D4E11": "f8920ae2ff48218aa739598eb7a2c9667d498c23db139475ed904a6bf2040190",
+    "4A423E72D2ED": "7e34f23b0e407a35d53bdcb59efcce1bb2f127dbd008d2f5a82bc5c79021e49c",
+}
+
+BASED_ON_LINE_RE = re.compile(
+    r"^-\s+([A-F0-9]{12}):\s*`?([0-9a-f]{64})`?\s*$",
+    re.MULTILINE,
+)
+PACK_VERSION_RE = re.compile(r"^-\s+pack_version:\s*([0-9]+)\s*$", re.MULTILINE)
+
+
+def parse_based_on_hashes(text: str) -> dict[str, str]:
+    return {match.group(1): match.group(2) for match in BASED_ON_LINE_RE.finditer(text)}
+
+
+def parse_pack_version(text: str) -> int | None:
+    match = PACK_VERSION_RE.search(text)
+    return int(match.group(1)) if match else None
+
+
+def normalize_pack_body(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n").rstrip() + "\n"
 
 
 CANONICAL_STARTUP_CONTRACT_PACK_BODY = """# Startup Contract Pack v1
@@ -101,7 +143,7 @@ Sources:
 
 
 def normalized_startup_contract_pack_body() -> str:
-    return CANONICAL_STARTUP_CONTRACT_PACK_BODY.replace("\r\n", "\n").replace("\r", "\n").rstrip() + "\n"
+    return normalize_pack_body(CANONICAL_STARTUP_CONTRACT_PACK_BODY)
 
 
 def startup_contract_pack_hash() -> str:

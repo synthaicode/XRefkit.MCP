@@ -348,6 +348,21 @@ The client must not assume the XRefKit repository exists on the client machine.
 Use the startup contract pack as the model-facing startup text and resolve any
 needed source document bodies through MCP by XID.
 
+The pack is a hand-compressed derivation of six source documents, so it
+carries drift detection. The authoritative body is the pack document in the
+served repository (`docs/core/contracts/079_startup_contract_pack.md`, xid
+`D4E8A1C63B57`, reported as `pack_source: repository_document`); when a
+repository does not carry it, the body embedded in this package is served
+as `pack_source: embedded_fallback`. Either way the `based_on_hashes`
+recorded when the pack was authored are compared against the live
+`source_hashes` on every call: any mismatch sets `stale: true`, lists the
+changed sources in `stale_sources`, and appends a client instruction to
+prefer the live sources via `get_document_by_xid` and escalate for pack
+regeneration. Maintainers regenerate the hash lines with
+`xrefkit-mcp-catalog startup-pack-hashes --repo <repo>` and can gate CI
+with `xrefkit-mcp-catalog check-startup-pack --repo <repo>` (exits
+non-zero when stale).
+
 Do not inject the raw `get_startup_context` JSON into the model prompt. Treat
 the JSON response as machine-readable control metadata. The model-facing
 initialization text is the plain-text `startup_contract_pack.body`; keep routing
@@ -720,6 +735,13 @@ anyio.run(main)
 ```
 
 ## Security Notes
+
+Scope decision: this server is not a universal/public service. It supplies
+domain knowledge and operating context for very local use — a developer
+machine or a trusted network segment. Authentication is therefore
+intentionally not built into the server; the trust boundary is an
+operational responsibility (network placement, and a reverse proxy /
+gateway when one is needed).
 
 This server is read-only, but it can expose repository documentation and Skill
 content over the network. Bind to `127.0.0.1` unless the network is trusted or a

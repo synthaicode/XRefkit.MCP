@@ -42,8 +42,12 @@ from .schemas import (
     XRefDocument,
 )
 from .startup_contract_pack import (
+    EMBEDDED_BASED_ON_HASHES,
+    STARTUP_CONTRACT_PACK_XID,
+    normalize_pack_body,
     normalized_startup_contract_pack_body,
-    startup_contract_pack_hash,
+    parse_based_on_hashes,
+    parse_pack_version,
 )
 
 
@@ -495,6 +499,23 @@ class XRefCatalog:
                     repository_fingerprint=self.repository_fingerprint,
                 )
             )
+        pack_resolved = managed_documents.get(STARTUP_CONTRACT_PACK_XID)
+        pack_document_text = pack_resolved[1] if pack_resolved else None
+        startup_contract_pack = _startup_contract_pack(references, pack_document_text)
+        client_instructions = _client_instructions()
+        if startup_contract_pack["stale"]:
+            stale_xids = [
+                str(item["xid"]) for item in startup_contract_pack["stale_sources"]
+            ]
+            client_instructions = [
+                *client_instructions,
+                "startup_contract_pack is STALE: the source documents "
+                f"{', '.join(stale_xids)} changed after the pack was authored "
+                "(based_on_hashes no longer match source_hashes). Treat the "
+                "pack wording as potentially outdated for those areas, resolve "
+                "the live sources with get_document_by_xid, and escalate to "
+                "the repository maintainers to regenerate the pack.",
+            ]
         return StartupContext(
             catalog_version=self.catalog_version,
             repository_identity=self.get_repository_identity(),
@@ -528,22 +549,7 @@ class XRefCatalog:
             context_injection_policy=_context_injection_policy(),
             session_context_deduplication=_session_context_deduplication(),
             core_runtime_distribution=_fm_runtime_distribution(self.repo_root).to_dict(),
-            client_instructions=[
-                "A client may call get_repository_identity as a content-free cache namespace preflight; get_startup_context remains the first governance-content load.",
-                "Fetch core_runtime_distribution (get_fm_runtime_bundle or get_fm_runtime_pip_package) immediately after this call, unconditionally. Unlike client_tool_download, this is not gated behind Skill selection: Skill execution requires python -m fm skill run right after a Skill is chosen.",
-                "Materialize and apply startup references in load_order before routing task-specific work. Applying a reference means enforcing its operational contract in the client runtime; it does not require injecting the full document body into the model prompt unless context_injection_policy requires it.",
-                "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
-                "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
-                "Do not assume referenced Markdown files exist on the client filesystem.",
-                "Do not automatically load all links from startup references; use links only when the current task actually needs them.",
-                "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
-                "Use the returned document content as the authoritative text for that XID.",
-                "At startup, record the XIDs used for client-side routing, policy, or context-injection decisions in a client-side audit log.",
-                "For Skill entries, use skill_content as the procedure body and resolve skill_links through get_document_by_xid when needed.",
-                "Keep client-side XID document cache entries only when cache_policy.cache_recommended is true.",
-                "Fetch client-side tool manifests or packages only after a selected Skill declares client-side required_tools.",
-                "Send cached content_hash values as known_version or known_document_versions; when cache_status is not_modified, use the locally hash-validated body instead of downloading it again.",
-            ],
+            client_instructions=client_instructions,
             client_obligations=_client_obligations(),
             link_resolution={
                 "link_field": "links",
@@ -555,7 +561,7 @@ class XRefCatalog:
                 "example_call": "get_document_by_xid({\"xid\": \"8A666C1FD121\"})",
             },
             load_order=[reference.xid for reference in references],
-            startup_contract_pack=_startup_contract_pack(references),
+            startup_contract_pack=startup_contract_pack,
             references=references,
             semantic_routing_references=_semantic_routing_references(),
             missing=missing,
@@ -572,6 +578,25 @@ class XRefCatalog:
             if entry.skill_id == skill_id:
                 return entry
         raise KeyError(f"skill not found: {skill_id}")
+
+
+def _client_instructions() -> list[str]:
+    return [
+        "A client may call get_repository_identity as a content-free cache namespace preflight; get_startup_context remains the first governance-content load.",
+        "Fetch core_runtime_distribution (get_fm_runtime_bundle or get_fm_runtime_pip_package) immediately after this call, unconditionally. Unlike client_tool_download, this is not gated behind Skill selection: Skill execution requires python -m fm skill run right after a Skill is chosen.",
+        "Materialize and apply startup references in load_order before routing task-specific work. Applying a reference means enforcing its operational contract in the client runtime; it does not require injecting the full document body into the model prompt unless context_injection_policy requires it.",
+        "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
+        "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
+        "Do not assume referenced Markdown files exist on the client filesystem.",
+        "Do not automatically load all links from startup references; use links only when the current task actually needs them.",
+        "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
+        "Use the returned document content as the authoritative text for that XID.",
+        "At startup, record the XIDs used for client-side routing, policy, or context-injection decisions in a client-side audit log.",
+        "For Skill entries, use skill_content as the procedure body and resolve skill_links through get_document_by_xid when needed.",
+        "Keep client-side XID document cache entries only when cache_policy.cache_recommended is true.",
+        "Fetch client-side tool manifests or packages only after a selected Skill declares client-side required_tools.",
+        "Send cached content_hash values as known_version or known_document_versions; when cache_status is not_modified, use the locally hash-validated body instead of downloading it again.",
+    ]
 
 
 def _knowledge_entry(root: Path, path: Path, text: str) -> KnowledgeCatalogEntry:
@@ -750,7 +775,10 @@ def _skill_document_versions(
     return versions
 
 
-def _startup_contract_pack(references: list[StartupReference]) -> dict[str, object]:
+def _startup_contract_pack(
+    references: list[StartupReference],
+    pack_document_text: str | None,
+) -> dict[str, object]:
     source_xids = [reference.xid for reference in references]
     expected_xids = [xid for xid, _layer in STARTUP_REFERENCE_DEFINITIONS]
     if source_xids != expected_xids:
@@ -765,13 +793,50 @@ def _startup_contract_pack(references: list[StartupReference]) -> dict[str, obje
         if not reference.content_hash:
             raise ValueError(f"startup reference missing content_hash: {reference.xid}")
         source_hashes[reference.xid] = reference.content_hash
+
+    # The pack is a hand-compressed derivation of the source documents, so
+    # it can drift when a source changes. Authoritative body: the pack
+    # document in the served repository (authored and reviewed next to its
+    # sources); fallback: the body embedded in this package. Either way the
+    # based_on hashes recorded at authoring time are compared against the
+    # live source hashes and any mismatch is reported as staleness instead
+    # of being silently served.
+    if pack_document_text is not None:
+        body = normalize_pack_body(markdown_xid_only_text(pack_document_text))
+        based_on_hashes = parse_based_on_hashes(pack_document_text)
+        pack_version = parse_pack_version(pack_document_text) or 1
+        pack_source = "repository_document"
+        pack_doc_xid: str | None = STARTUP_CONTRACT_PACK_XID
+    else:
+        body = normalized_startup_contract_pack_body()
+        based_on_hashes = dict(EMBEDDED_BASED_ON_HASHES)
+        pack_version = 1
+        pack_source = "embedded_fallback"
+        pack_doc_xid = None
+
+    stale_sources: list[dict[str, str | None]] = []
+    for xid in source_xids:
+        based_on = based_on_hashes.get(xid)
+        if based_on != source_hashes[xid]:
+            stale_sources.append(
+                {
+                    "xid": xid,
+                    "based_on_hash": based_on,
+                    "live_hash": source_hashes[xid],
+                }
+            )
     return {
         "mode": "required_startup_contract_pack",
-        "pack_version": 1,
+        "pack_version": pack_version,
+        "pack_source": pack_source,
+        "pack_doc_xid": pack_doc_xid,
         "source_xids": source_xids,
         "source_hashes": source_hashes,
-        "pack_hash": startup_contract_pack_hash(),
-        "body": normalized_startup_contract_pack_body(),
+        "based_on_hashes": based_on_hashes,
+        "stale": bool(stale_sources),
+        "stale_sources": stale_sources,
+        "pack_hash": stable_hash(body),
+        "body": body,
     }
 
 

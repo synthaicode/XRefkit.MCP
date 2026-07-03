@@ -23,6 +23,18 @@ def main(argv: list[str] | None = None) -> int:
     startup = sub.add_parser("startup-context", help="print required startup references")
     startup.add_argument("--repo", required=True)
 
+    pack_hashes = sub.add_parser(
+        "startup-pack-hashes",
+        help="print the Based On hash lines for the startup contract pack document",
+    )
+    pack_hashes.add_argument("--repo", required=True)
+
+    pack_check = sub.add_parser(
+        "check-startup-pack",
+        help="exit non-zero when the startup contract pack is stale against its sources",
+    )
+    pack_check.add_argument("--repo", required=True)
+
     knowledge = sub.add_parser("search-knowledge", help="search knowledge catalog")
     knowledge.add_argument("--repo", required=True)
     knowledge.add_argument("--query", required=True)
@@ -102,6 +114,21 @@ def main(argv: list[str] | None = None) -> int:
         payload = model.get_repository_identity()
     elif args.command == "startup-context":
         payload = model.get_startup_context()
+    elif args.command == "startup-pack-hashes":
+        references = model.get_startup_context()["references"]
+        for reference in references:
+            print(f"- {reference['xid']}: `{reference['content_hash']}`")
+        return 0
+    elif args.command == "check-startup-pack":
+        pack = model.get_startup_context()["startup_contract_pack"]
+        payload = {
+            "pack_source": pack["pack_source"],
+            "pack_doc_xid": pack["pack_doc_xid"],
+            "stale": pack["stale"],
+            "stale_sources": pack["stale_sources"],
+        }
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+        return 1 if pack["stale"] else 0
     elif args.command == "search-knowledge":
         payload = model.search_knowledge_catalog(args.query, args.limit)
     elif args.command == "expand-knowledge":
