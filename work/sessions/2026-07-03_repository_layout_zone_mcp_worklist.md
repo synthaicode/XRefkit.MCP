@@ -162,7 +162,15 @@ python -m xrefkit_mcp.cli rank-skills --repo C:\dev\itsm\XRefKit --purpose "repo
 
 ## Open Items
 
-- Decide whether `get_repository_zones` should be public in the first
-  implementation or kept internal until a client needs it.
-- Decide whether local pack discovery is enabled by default or server-flagged.
-- Decide the exact schema for duplicate-identity conflict responses.
+- Decided: keep `get_repository_zones` internal for this implementation. Zone
+  state is exposed through compact `get_startup_context.repository_zones`
+  metadata until a client needs a dedicated public tool.
+- Decided: local pack discovery is enabled by default when `ownership.yaml`
+  declares `packs/local/` with `catalog: true`; local pack tool scripts remain
+  non-distributable when the zone has `distribution: false`.
+- Decided: duplicate-identity conflict responses are the explicit fail-closed
+  schema already implemented for XID bodies: `{ok:false, error:"xid_conflict",
+  xid, message, matches:[{path, content_hash, zone_metadata}]}`. Duplicate
+  Skill IDs are reported in `list_skills[].zone_metadata.identity_conflict`
+  and `get_skill` fails closed with `ValueError` until a formal public error
+  envelope is needed.
