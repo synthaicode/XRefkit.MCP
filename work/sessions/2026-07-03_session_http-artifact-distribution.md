@@ -106,6 +106,27 @@ sources by XID and escalate. New CLI: startup-pack-hashes (regenerate
 hash lines) and check-startup-pack (CI gate, exit 1 when stale). Real
 repo verified stale=false; 84 tests pass (4 new drift tests).
 
+Follow-up event (same day, base-sync handoff package): built
+handoff/base_sync/ in the XRefKit repo for the base-vs-local divergence
+problem. export_base_manifest.py (base side, git) freezes the
+codex/sync-main-without-mp4-action history into a portable 546KB manifest
+(XID -> path/xid-normalized hash/anchors, delta-encoded per commit).
+xrefkit_sync_worklist.py (local side, stdlib-only, read-only)
+content-dates the local file copy against the manifest and produces an
+XID-keyed 3-way worklist (base@copy/base@head/local) for the absorbing AI.
+HANDOFF.md is the Sonnet-facing prompt encoding the agreed policy: adopt
+base-only changes, ladder-classify local-only changes (facts->knowledge,
+params->bindings, procedure->fork with fork_base_hash), intake no-XID
+files as new with new XIDs and let the local AI repoint Skill references,
+never auto-merge both_changed. Verified on a synthetic fixture (40-commits
+-old snapshot + injected mutations): copy point identified exactly (99%
+match), all injected mutations classified 1:1, and the real base docs/
+reorganization tracked as 25 moved_in_base instead of false conflicts.
+Two design lessons captured in code: XID identity must come from
+declarations only (link references and words like "xid-based" poisoned
+first_xid), and human-docs/ translations legitimately reuse canonical XIDs
+so they are path-keyed.
+
 ## Decision
 
 Human accepted the proposal: MCP channel = governance context only; plain
