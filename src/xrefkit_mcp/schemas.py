@@ -53,6 +53,7 @@ class KnowledgeCatalogEntry:
     path: str
     expandable: bool = True
     missing: list[str] = field(default_factory=list)
+    zone_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -95,6 +96,7 @@ class SkillCatalogEntry:
     meta_path: str
     context_size: dict[str, Any]
     missing: list[str] = field(default_factory=list)
+    zone_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -169,6 +171,7 @@ class WorkflowCatalogEntry:
     runs_after: list[str]
     runs_before: list[str]
     missing: list[str] = field(default_factory=list)
+    zone_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -289,6 +292,7 @@ class StartupContext:
     context_injection_policy: dict[str, Any]
     session_context_deduplication: dict[str, Any]
     core_runtime_distribution: dict[str, Any]
+    repository_zones: dict[str, Any]
     client_instructions: list[str]
     client_obligations: list[ClientObligation]
     link_resolution: dict[str, str]
@@ -306,6 +310,7 @@ class StartupContext:
             "context_injection_policy": self.context_injection_policy,
             "session_context_deduplication": self.session_context_deduplication,
             "core_runtime_distribution": self.core_runtime_distribution,
+            "repository_zones": self.repository_zones,
             "client_instructions": self.client_instructions,
             "client_obligations": [
                 obligation.to_dict() for obligation in self.client_obligations

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .contracts import builtin_tool_contracts
+from .ownership import Ownership, load_ownership, validate_ownership
 from .repository import (
     first_heading,
     first_paragraph,
@@ -112,6 +113,7 @@ class XRefCatalog:
     repository_fingerprint: str
     fingerprint_basis: str
     tools: list[ToolContract]
+    ownership: Ownership | None = None
 
     @classmethod
     def build(cls, repo_root: str | Path) -> "XRefCatalog":
@@ -119,11 +121,17 @@ class XRefCatalog:
         if not root.exists():
             raise FileNotFoundError(root)
         fingerprint, fingerprint_basis = repository_identity(root)
+        ownership = load_ownership(root)
+        if ownership is not None:
+            errors = validate_ownership(root, ownership)
+            if errors:
+                raise ValueError("invalid ownership.yaml: " + "; ".join(errors))
         return cls(
             repo_root=root,
             repository_fingerprint=fingerprint,
             fingerprint_basis=fingerprint_basis,
             tools=builtin_tool_contracts(),
+            ownership=ownership,
         )
 
     # knowledge, skills, and catalog_version are rebuilt from the live
@@ -139,7 +147,7 @@ class XRefCatalog:
 
     @property
     def skills(self) -> list[SkillCatalogEntry]:
-        return _build_skills(self.repo_root)
+        return _build_skills(self.repo_root, self.ownership)
 
     @property
     def catalog_version(self) -> str:
@@ -147,6 +155,7 @@ class XRefCatalog:
             [entry.content_hash for entry in self.knowledge]
             + [entry.skill_id + entry.summary for entry in self.skills]
             + [tool.tool_id + tool.version for tool in self.tools]
+            + ([self.ownership.content_hash] if self.ownership else [])
         )
         return stable_hash(version_basis)[:16]
 
@@ -154,9 +163,9 @@ class XRefCatalog:
         """One consistent read per file: entry hash and body come from the
         same text, so they can never disagree."""
         entries: list[tuple[KnowledgeCatalogEntry, str]] = []
-        for path in sorted((self.repo_root / "knowledge").glob("**/*.md")):
+        for path in _content_files(self.repo_root, self.ownership, "knowledge", "*.md"):
             text = read_text(path)
-            entries.append((_knowledge_entry(self.repo_root, path, text), text))
+            entries.append((_knowledge_entry(self.repo_root, self.ownership, path, text), text))
         return entries
 
     def get_repository_identity(self) -> dict[str, str]:
@@ -221,6 +230,12 @@ class XRefCatalog:
         # body_mode=lazy context policy.
         entries = self.skills[: limit or None]
         results = [entry.to_dict() for entry in entries]
+        duplicate_ids = _duplicate_skill_ids(self.skills)
+        for result in results:
+            if result["skill_id"] in duplicate_ids:
+                result.setdefault("zone_metadata", {})["identity_conflict"] = True
+                result["zone_metadata"]["conflict_key"] = result["skill_id"]
+                result["zone_metadata"]["conflict_paths"] = duplicate_ids[result["skill_id"]]
         if not include_content:
             for entry, result in zip(entries, results, strict=True):
                 result["meta_content"] = None
@@ -328,7 +343,7 @@ class XRefCatalog:
         return [contract.to_dict() for contract in self.tools]
 
     def list_workflows(self) -> list[dict]:
-        return [workflow.to_dict() for workflow in _build_workflows(self.repo_root)]
+        return [workflow.to_dict() for workflow in _build_workflows(self.repo_root, self.ownership)]
 
     def get_client_tool_manifest(self) -> dict:
         return _client_tool_distribution(self.repo_root).to_dict()
@@ -442,14 +457,29 @@ class XRefCatalog:
         xid: str,
         known_version: str | None = None,
     ) -> dict:
-        for path in _managed_markdown_files(self.repo_root):
-            text = read_text(path)
-            if first_xid(text) == xid:
-                return _conditional_document_response(
-                    _xref_document(path, self.repo_root, text),
-                    known_version,
-                    self.repository_fingerprint,
-                )
+        matches = _managed_markdown_matches_by_xid(self.repo_root, self.ownership, xid)
+        if len(matches) > 1:
+            return {
+                "ok": False,
+                "error": "xid_conflict",
+                "xid": xid,
+                "message": "multiple catalog-visible documents declare this XID; refusing path-order selection",
+                "matches": [
+                    {
+                        "path": relative_to_repo(path, self.repo_root),
+                        "content_hash": _xref_document(path, self.repo_root, text).content_hash,
+                        "zone_metadata": _zone_metadata(self.ownership, relative_to_repo(path, self.repo_root)),
+                    }
+                    for path, text in matches
+                ],
+            }
+        if len(matches) == 1:
+            path, text = matches[0]
+            return _conditional_document_response(
+                _xref_document(path, self.repo_root, text),
+                known_version,
+                self.repository_fingerprint,
+            )
         raise KeyError(f"document xid not found: {xid}")
 
     def get_startup_context(
@@ -459,7 +489,7 @@ class XRefCatalog:
         known_document_versions = known_document_versions or {}
         references: list[StartupReference] = []
         missing: list[dict[str, str]] = []
-        managed_documents = _managed_markdown_by_xid(self.repo_root)
+        managed_documents = _managed_markdown_by_xid(self.repo_root, self.ownership)
         for expected_xid, layer in STARTUP_REFERENCE_DEFINITIONS:
             resolved = managed_documents.get(expected_xid)
             if resolved is None:
@@ -549,6 +579,7 @@ class XRefCatalog:
             context_injection_policy=_context_injection_policy(),
             session_context_deduplication=_session_context_deduplication(),
             core_runtime_distribution=_fm_runtime_distribution(self.repo_root).to_dict(),
+            repository_zones=_repository_zones(self.ownership),
             client_instructions=client_instructions,
             client_obligations=_client_obligations(),
             link_resolution={
@@ -574,9 +605,15 @@ class XRefCatalog:
         raise KeyError(f"knowledge xid not found: {xid}")
 
     def _skill_by_id(self, skill_id: str) -> SkillCatalogEntry:
-        for entry in self.skills:
-            if entry.skill_id == skill_id:
-                return entry
+        matches = [entry for entry in self.skills if entry.skill_id == skill_id]
+        if len(matches) > 1:
+            paths = [entry.meta_path for entry in matches]
+            raise ValueError(
+                "skill identity conflict: "
+                f"{skill_id} appears in multiple catalog-visible entries: {paths}"
+            )
+        if len(matches) == 1:
+            return matches[0]
         raise KeyError(f"skill not found: {skill_id}")
 
 
@@ -599,7 +636,64 @@ def _client_instructions() -> list[str]:
     ]
 
 
-def _knowledge_entry(root: Path, path: Path, text: str) -> KnowledgeCatalogEntry:
+def _content_files(
+    root: Path,
+    ownership: Ownership | None,
+    family: str,
+    pattern: str,
+) -> list[Path]:
+    paths: list[Path] = []
+    base = root / family
+    if base.exists():
+        paths.extend(
+            path
+            for path in sorted(base.glob(f"**/{pattern}"))
+            if _catalog_enabled(root, ownership, path)
+        )
+    packs_root = root / "packs"
+    if ownership is not None and packs_root.exists():
+        paths.extend(
+            path
+            for path in sorted(packs_root.glob(f"*/{family}/**/{pattern}"))
+            if _catalog_enabled(root, ownership, path)
+        )
+        paths.extend(
+            path
+            for path in sorted(packs_root.glob(f"local/*/{family}/**/{pattern}"))
+            if _catalog_enabled(root, ownership, path)
+        )
+    return sorted(set(paths))
+
+
+def _catalog_enabled(root: Path, ownership: Ownership | None, path: Path) -> bool:
+    if ownership is None:
+        return True
+    return ownership.catalog_enabled(relative_to_repo(path, root))
+
+
+def _zone_metadata(ownership: Ownership | None, rel_path: str) -> dict[str, object]:
+    if ownership is None:
+        return {
+            "ownership_enabled": False,
+            "zone": None,
+            "owner": None,
+            "pack_id": None,
+            "local_only": False,
+            "catalog": True,
+            "distribution": True,
+            "shadowing": False,
+        }
+    metadata = ownership.metadata_for(rel_path)
+    metadata["ownership_enabled"] = True
+    return metadata
+
+
+def _knowledge_entry(
+    root: Path,
+    ownership: Ownership | None,
+    path: Path,
+    text: str,
+) -> KnowledgeCatalogEntry:
     xid = first_xid(text)
     missing: list[str] = []
     if not xid:
@@ -623,26 +717,54 @@ def _knowledge_entry(root: Path, path: Path, text: str) -> KnowledgeCatalogEntry
         related_capabilities=[],
         path=rel,
         missing=missing,
+        zone_metadata=_zone_metadata(ownership, rel),
     )
 
 
-def _managed_markdown_files(root: Path) -> list[Path]:
+def _managed_markdown_files(root: Path, ownership: Ownership | None = None) -> list[Path]:
     files: list[Path] = []
     for dirname in ["agent", "docs", "knowledge", "capabilities", "skills"]:
         base = root / dirname
         if base.exists():
-            files.extend(sorted(base.glob("**/*.md")))
+            files.extend(path for path in sorted(base.glob("**/*.md")) if _catalog_enabled(root, ownership, path))
+    packs_root = root / "packs"
+    if ownership is not None and packs_root.exists():
+        files.extend(
+            path
+            for path in sorted(packs_root.glob("*/**/*.md"))
+            if _catalog_enabled(root, ownership, path)
+        )
     return files
 
 
-def _managed_markdown_by_xid(root: Path) -> dict[str, tuple[Path, str]]:
+def _managed_markdown_by_xid(root: Path, ownership: Ownership | None = None) -> dict[str, tuple[Path, str]]:
     documents: dict[str, tuple[Path, str]] = {}
-    for path in _managed_markdown_files(root):
+    for path in _managed_markdown_files(root, ownership):
         text = read_text(path)
         xid = first_xid(text)
         if xid:
             documents.setdefault(xid, (path, text))
     return documents
+
+
+def _managed_markdown_matches_by_xid(
+    root: Path,
+    ownership: Ownership | None,
+    xid: str,
+) -> list[tuple[Path, str]]:
+    matches: list[tuple[Path, str]] = []
+    for path in _managed_markdown_files(root, ownership):
+        text = read_text(path)
+        if first_xid(text) == xid:
+            matches.append((path, text))
+    return matches
+
+
+def _duplicate_skill_ids(entries: list[SkillCatalogEntry]) -> dict[str, list[str]]:
+    by_id: dict[str, list[str]] = {}
+    for entry in entries:
+        by_id.setdefault(entry.skill_id, []).append(entry.meta_path)
+    return {skill_id: paths for skill_id, paths in by_id.items() if len(paths) > 1}
 
 
 def _xref_document(path: Path, root: Path, text: str) -> XRefDocument:
@@ -840,7 +962,7 @@ def _startup_contract_pack(
     }
 
 
-def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
+def _build_skill_entry(root: Path, ownership: Ownership | None, meta_path: Path) -> SkillCatalogEntry:
     text = read_text(meta_path)
     meta = parse_meta_bullets(text)
     skill_id = str(meta.get("skill_id") or meta_path.parent.name)
@@ -859,6 +981,7 @@ def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
             _nested_value(meta, "os_contract", "worklist_policy") or "required"
         ),
     )
+    rel_meta = relative_to_repo(meta_path, root)
     return SkillCatalogEntry(
         skill_id=skill_id,
         title=first_heading(skill_text or text, skill_id),
@@ -881,7 +1004,7 @@ def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
         skill_content=skill_text,
         skill_links=markdown_xid_link_targets(skill_text),
         path=relative_to_repo(skill_doc, root) if skill_doc.exists() else "",
-        meta_path=relative_to_repo(meta_path, root),
+        meta_path=rel_meta,
         context_size=_skill_context_size(
             text,
             skill_text,
@@ -889,22 +1012,20 @@ def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
             closure,
         ),
         missing=missing,
+        zone_metadata=_zone_metadata(ownership, rel_meta),
     )
 
 
-def _build_skills(root: Path) -> list[SkillCatalogEntry]:
+def _build_skills(root: Path, ownership: Ownership | None = None) -> list[SkillCatalogEntry]:
     entries: list[SkillCatalogEntry] = []
-    for meta_path in sorted((root / "skills").glob("**/meta.md")):
-        entries.append(_build_skill_entry(root, meta_path))
+    for meta_path in _content_files(root, ownership, "skills", "meta.md"):
+        entries.append(_build_skill_entry(root, ownership, meta_path))
     return entries
 
 
-def _build_workflows(root: Path) -> list[WorkflowCatalogEntry]:
-    flows_root = root / "flows"
-    if not flows_root.exists():
-        return []
+def _build_workflows(root: Path, ownership: Ownership | None = None) -> list[WorkflowCatalogEntry]:
     entries: list[WorkflowCatalogEntry] = []
-    for path in sorted(flows_root.glob("**/*.yaml")):
+    for path in _content_files(root, ownership, "flows", "*.yaml"):
         text = read_text(path)
         scalar = _yaml_top_scalars(text)
         owner = _yaml_nested_scalar(text, "owner", "primary")
@@ -939,6 +1060,7 @@ def _build_workflows(root: Path) -> list[WorkflowCatalogEntry]:
                 runs_after=_yaml_top_list(text, "runs_after"),
                 runs_before=_yaml_top_list(text, "runs_before"),
                 missing=missing,
+                zone_metadata=_zone_metadata(ownership, relative_to_repo(path, root)),
             )
         )
     return entries
@@ -1486,7 +1608,31 @@ def _session_context_deduplication() -> dict[str, object]:
     }
 
 
+def _repository_zones(ownership: Ownership | None) -> dict[str, object]:
+    if ownership is None:
+        return {
+            "ownership_enabled": False,
+            "ownership_hash": None,
+            "zone_ids": [],
+            "local_packs_declared": False,
+            "catalog_roots_are_zone_aware": False,
+        }
+    zone_ids = [zone.id for zone in ownership.zones]
+    return {
+        "ownership_enabled": True,
+        "ownership_hash": ownership.content_hash,
+        "zone_ids": zone_ids,
+        "local_packs_declared": any(zone.id == "local-packs" for zone in ownership.zones),
+        "catalog_roots_are_zone_aware": True,
+    }
+
+
 def _client_tool_files(root: Path) -> list[ClientToolFile]:
+    ownership = load_ownership(root)
+    if ownership is not None:
+        errors = validate_ownership(root, ownership)
+        if errors:
+            raise ValueError("invalid ownership.yaml: " + "; ".join(errors))
     tools_root = root / "tools"
     paths: list[Path] = []
     support_paths: list[Path] = []
@@ -1514,6 +1660,24 @@ def _client_tool_files(root: Path) -> list[ClientToolFile]:
                 path
                 for path in skills_root.glob("**/*.py")
                 if "__pycache__" not in path.parts
+            )
+        )
+    packs_root = root / "packs"
+    if ownership is not None and packs_root.exists():
+        paths.extend(
+            sorted(
+                path
+                for path in packs_root.glob("*/skills/**/*.py")
+                if "__pycache__" not in path.parts
+                and ownership.distribution_enabled(relative_to_repo(path, root))
+            )
+        )
+        paths.extend(
+            sorted(
+                path
+                for path in packs_root.glob("local/*/skills/**/*.py")
+                if "__pycache__" not in path.parts
+                and ownership.distribution_enabled(relative_to_repo(path, root))
             )
         )
 

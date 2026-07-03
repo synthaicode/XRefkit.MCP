@@ -212,6 +212,220 @@ if __name__ == "__main__":
             catalog.repository_fingerprint,
         )
 
+    def test_pack_roots_require_ownership_metadata(self) -> None:
+        write(
+            self.repo / "packs" / "business-intake" / "knowledge" / "pack-rule.md",
+            """<!-- xid: PACKRULE123 -->
+<a id="xid-PACKRULE123"></a>
+
+# Pack Rule
+
+Pack-local rule.
+""",
+        )
+        write(
+            self.repo / "packs" / "business-intake" / "skills" / "pack_sample" / "meta.md",
+            """# Skill Meta: pack_sample
+
+- skill_id: `pack_sample`
+- summary: pack sample
+- skill_doc: `./SKILL.md`
+- maturity: `trial`
+""",
+        )
+        write(
+            self.repo / "packs" / "business-intake" / "skills" / "pack_sample" / "SKILL.md",
+            "# Pack Sample\n",
+        )
+        write(
+            self.repo / "packs" / "business-intake" / "flows" / "pack_flow.yaml",
+            """flow_id: FLOW-PACK
+name: pack_flow
+doc_xid: PACKFLOWDOC
+entry: start
+steps:
+  start:
+    on:
+      Go: COMPLETE
+""",
+        )
+
+        without_ownership = XRefCatalog.build(self.repo)
+
+        self.assertNotIn("PACKRULE123", [entry.xid for entry in without_ownership.knowledge])
+        self.assertNotIn("pack_sample", [entry.skill_id for entry in without_ownership.skills])
+        self.assertNotIn("FLOW-PACK", [entry["flow_id"] for entry in without_ownership.list_workflows()])
+
+        write(
+            self.repo / "ownership.yaml",
+            """zones:
+  - id: shared-packs
+    owner: pack
+    paths:
+      - packs/*/
+    catalog: true
+    distribution: true
+    base_sync: true
+    shadowing: true
+""",
+        )
+
+        with_ownership = XRefCatalog.build(self.repo)
+        pack_knowledge = next(entry for entry in with_ownership.knowledge if entry.xid == "PACKRULE123")
+        pack_skill = next(entry for entry in with_ownership.skills if entry.skill_id == "pack_sample")
+        pack_flow = next(entry for entry in with_ownership.list_workflows() if entry["flow_id"] == "FLOW-PACK")
+
+        self.assertEqual("shared-packs", pack_knowledge.zone_metadata["zone"])
+        self.assertEqual("business-intake", pack_skill.zone_metadata["pack_id"])
+        self.assertEqual("shared-packs", pack_flow["zone_metadata"]["zone"])
+        self.assertTrue(with_ownership.get_startup_context()["repository_zones"]["ownership_enabled"])
+
+    def test_get_document_by_xid_fails_closed_on_duplicate_xid(self) -> None:
+        write(
+            self.repo / "ownership.yaml",
+            """zones:
+  - id: shared-packs
+    owner: pack
+    paths:
+      - packs/*/
+    catalog: true
+    distribution: true
+    base_sync: true
+    shadowing: true
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "knowledge" / "duplicate.md",
+            """<!-- xid: ABC123 -->
+<a id="xid-ABC123"></a>
+
+# Duplicate
+
+Duplicate body.
+""",
+        )
+        catalog = XRefCatalog.build(self.repo)
+
+        result = catalog.get_document_by_xid("ABC123")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("xid_conflict", result["error"])
+        self.assertEqual(2, len(result["matches"]))
+        self.assertEqual(
+            sorted(["knowledge/organization/rules.md", "packs/business/knowledge/duplicate.md"]),
+            sorted(match["path"] for match in result["matches"]),
+        )
+
+    def test_get_skill_fails_closed_on_duplicate_skill_id(self) -> None:
+        write(
+            self.repo / "ownership.yaml",
+            """zones:
+  - id: shared-packs
+    owner: pack
+    paths:
+      - packs/*/
+    catalog: true
+    distribution: true
+    base_sync: true
+    shadowing: true
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "skills" / "sample_duplicate" / "meta.md",
+            """# Skill Meta: sample duplicate
+
+- skill_id: `sample_review`
+- summary: duplicate sample
+- skill_doc: `./SKILL.md`
+- maturity: `trial`
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "skills" / "sample_duplicate" / "SKILL.md",
+            "# Duplicate Skill\n",
+        )
+        catalog = XRefCatalog.build(self.repo)
+
+        listed = [entry for entry in catalog.list_skills() if entry["skill_id"] == "sample_review"]
+
+        self.assertEqual(2, len(listed))
+        self.assertTrue(all(entry["zone_metadata"]["identity_conflict"] for entry in listed))
+        with self.assertRaises(ValueError):
+            catalog.get_skill("sample_review")
+
+    def test_pack_skill_scripts_are_distributed_but_local_pack_scripts_are_not(self) -> None:
+        write(
+            self.repo / "ownership.yaml",
+            """zones:
+  - id: local-packs
+    owner: local
+    paths:
+      - packs/local/
+    catalog: true
+    distribution: false
+    base_sync: false
+    shadowing: true
+  - id: shared-packs
+    owner: pack
+    paths:
+      - packs/*/
+    catalog: true
+    distribution: true
+    base_sync: true
+    shadowing: true
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "skills" / "pack_sample" / "scripts" / "shared_tool.py",
+            "print('shared')\n",
+        )
+        write(
+            self.repo / "packs" / "local" / "acme" / "skills" / "local_sample" / "scripts" / "local_tool.py",
+            "print('local')\n",
+        )
+        catalog = XRefCatalog.build(self.repo)
+
+        paths = [file["path"] for file in catalog.get_client_tool_bundle()["files"]]
+
+        self.assertIn("packs/business/skills/pack_sample/scripts/shared_tool.py", paths)
+        self.assertNotIn("packs/local/acme/skills/local_sample/scripts/local_tool.py", paths)
+
+    def test_rank_skills_includes_pack_skill_when_ownership_exists(self) -> None:
+        write(
+            self.repo / "ownership.yaml",
+            """zones:
+  - id: shared-packs
+    owner: pack
+    paths:
+      - packs/*/
+    catalog: true
+    distribution: true
+    base_sync: true
+    shadowing: true
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "skills" / "layout_zone" / "meta.md",
+            """# Skill Meta: layout_zone
+
+- skill_id: `layout_zone`
+- summary: migrate repository layout zones and ownership packs
+- applies_when:
+  - repository layout zone migration
+- skill_doc: `./SKILL.md`
+- maturity: `trial`
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "skills" / "layout_zone" / "SKILL.md",
+            "# Layout Zone\n",
+        )
+        catalog = XRefCatalog.build(self.repo)
+
+        ranked = catalog.rank_skills_for_purpose("repository layout zone migration", limit=3)
+
+        self.assertIn("layout_zone", [entry["skill_id"] for entry in ranked])
+
     def test_expands_knowledge_by_xid(self) -> None:
         catalog = XRefCatalog.build(self.repo)
 
