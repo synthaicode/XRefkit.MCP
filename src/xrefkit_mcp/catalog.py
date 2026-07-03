@@ -13,14 +13,14 @@ from .repository import (
     first_heading,
     first_paragraph,
     first_xid,
-    git_last_modified,
+    file_last_modified,
     markdown_xid_link_targets,
     markdown_xid_only_text,
     markdown_xid_links,
     parse_meta_bullets,
     read_text,
     relative_to_repo,
-    repository_fingerprint,
+    repository_identity,
     scalar_list,
     stable_hash,
 )
@@ -106,9 +106,7 @@ STOP_TOKENS = {
 class XRefCatalog:
     repo_root: Path
     repository_fingerprint: str
-    catalog_version: str
-    knowledge: list[KnowledgeCatalogEntry]
-    skills: list[SkillCatalogEntry]
+    fingerprint_basis: str
     tools: list[ToolContract]
 
     @classmethod
@@ -116,29 +114,57 @@ class XRefCatalog:
         root = Path(repo_root).resolve()
         if not root.exists():
             raise FileNotFoundError(root)
-        knowledge = _build_knowledge(root)
-        skills = _build_skills(root)
-        tools = builtin_tool_contracts()
-        version_basis = "\n".join(
-            [entry.content_hash for entry in knowledge]
-            + [entry.skill_id + entry.summary for entry in skills]
-            + [tool.tool_id + tool.version for tool in tools]
-        )
-        catalog_version = stable_hash(version_basis)[:16]
+        fingerprint, fingerprint_basis = repository_identity(root)
         return cls(
             repo_root=root,
-            repository_fingerprint=repository_fingerprint(root),
-            catalog_version=catalog_version,
-            knowledge=knowledge,
-            skills=skills,
-            tools=tools,
+            repository_fingerprint=fingerprint,
+            fingerprint_basis=fingerprint_basis,
+            tools=builtin_tool_contracts(),
         )
+
+    # knowledge, skills, and catalog_version are rebuilt from the live
+    # repository on every access so every content-bearing response shares one
+    # freshness model with get_document_by_xid (live reads). A frozen
+    # build-time snapshot previously let expand_knowledge return a stale
+    # content_hash next to a live body on a long-running server, silently
+    # breaking the client cache protocol, and hid knowledge/Skill files added
+    # or removed after startup.
+    @property
+    def knowledge(self) -> list[KnowledgeCatalogEntry]:
+        return [entry for entry, _text in self._scan_knowledge()]
+
+    @property
+    def skills(self) -> list[SkillCatalogEntry]:
+        return _build_skills(self.repo_root)
+
+    @property
+    def catalog_version(self) -> str:
+        version_basis = "\n".join(
+            [entry.content_hash for entry in self.knowledge]
+            + [entry.skill_id + entry.summary for entry in self.skills]
+            + [tool.tool_id + tool.version for tool in self.tools]
+        )
+        return stable_hash(version_basis)[:16]
+
+    def _scan_knowledge(self) -> list[tuple[KnowledgeCatalogEntry, str]]:
+        """One consistent read per file: entry hash and body come from the
+        same text, so they can never disagree."""
+        entries: list[tuple[KnowledgeCatalogEntry, str]] = []
+        for path in sorted((self.repo_root / "knowledge").glob("**/*.md")):
+            text = read_text(path)
+            entries.append((_knowledge_entry(self.repo_root, path, text), text))
+        return entries
 
     def get_repository_identity(self) -> dict[str, str]:
         return {
             "repository_fingerprint": self.repository_fingerprint,
             "fingerprint_algorithm": "sha256",
-            "fingerprint_basis": "resolved_repository_root",
+            "fingerprint_basis": self.fingerprint_basis,
+            "fingerprint_scope": (
+                "shared_across_clones"
+                if self.fingerprint_basis == "git_root_commits"
+                else "local_path_only"
+            ),
             "cache_namespace": self.repository_fingerprint,
         }
 
@@ -149,13 +175,13 @@ class XRefCatalog:
         return [entry.to_dict() for entry in _rank_entries(query, self.knowledge)[:limit]]
 
     def expand_knowledge(self, xid: str) -> dict:
-        entry = self._knowledge_by_xid(xid)
-        content = read_text(self.repo_root / entry.path)
+        entry, content = self._knowledge_by_xid(xid)
         return {"entry": entry.to_dict(), "content": content}
 
     def build_knowledge_context(self, query: str, limit: int = 5) -> dict:
-        ranked = _rank_entries(query, self.knowledge)[:limit]
-        by_xid = {entry.xid: entry for entry in self.knowledge}
+        scanned = self._scan_knowledge()
+        ranked = _rank_entries(query, [entry for entry, _text in scanned])[:limit]
+        by_xid = {entry.xid: (entry, text) for entry, text in scanned}
         expanded: list[dict] = []
         missing: list[dict] = []
         seen: set[str] = set()
@@ -173,21 +199,26 @@ class XRefCatalog:
                         }
                     )
                     continue
-                expanded.append(self.expand_knowledge(candidate.xid))
+                candidate_entry, candidate_text = candidate
+                expanded.append(
+                    {"entry": candidate_entry.to_dict(), "content": candidate_text}
+                )
         return {"entries": expanded, "missing": missing}
 
     def list_skills(
         self,
         limit: int | None = None,
-        include_content: bool = True,
+        include_content: bool = False,
     ) -> list[dict]:
-        fresh_entries = [
-            _fresh_skill_entry(entry, self.repo_root)
-            for entry in self.skills[: limit or None]
-        ]
-        results = [entry.to_dict() for entry in fresh_entries]
+        # Metadata-only by default: full procedure bodies are lazy-loaded
+        # governance content (get_skill), not routing metadata. The old
+        # include_content=True default let one ungated call return every
+        # SKILL.md body, bypassing both the startup ordering and the
+        # body_mode=lazy context policy.
+        entries = self.skills[: limit or None]
+        results = [entry.to_dict() for entry in entries]
         if not include_content:
-            for entry, result in zip(fresh_entries, results, strict=True):
+            for entry, result in zip(entries, results, strict=True):
                 result["meta_content"] = None
                 result["skill_content"] = None
                 result["document_versions"] = _skill_document_versions(
@@ -203,7 +234,6 @@ class XRefCatalog:
         known_document_versions: dict[str, str] | None = None,
     ) -> dict:
         entry = self._skill_by_id(skill_id)
-        entry = _fresh_skill_entry(entry, self.repo_root)
         result = entry.to_dict()
         result["client_tool_download"] = _client_tool_download_policy(entry)
         if known_document_versions is None:
@@ -531,10 +561,10 @@ class XRefCatalog:
             missing=missing,
         ).to_dict()
 
-    def _knowledge_by_xid(self, xid: str) -> KnowledgeCatalogEntry:
-        for entry in self.knowledge:
+    def _knowledge_by_xid(self, xid: str) -> tuple[KnowledgeCatalogEntry, str]:
+        for entry, text in self._scan_knowledge():
             if entry.xid == xid:
-                return entry
+                return entry, text
         raise KeyError(f"knowledge xid not found: {xid}")
 
     def _skill_by_id(self, skill_id: str) -> SkillCatalogEntry:
@@ -544,37 +574,31 @@ class XRefCatalog:
         raise KeyError(f"skill not found: {skill_id}")
 
 
-def _build_knowledge(root: Path) -> list[KnowledgeCatalogEntry]:
-    entries: list[KnowledgeCatalogEntry] = []
-    for path in sorted((root / "knowledge").glob("**/*.md")):
-        text = read_text(path)
-        xid = first_xid(text)
-        missing: list[str] = []
-        if not xid:
-            xid = f"path:{relative_to_repo(path, root)}"
-            missing.append("xid")
-        rel = relative_to_repo(path, root)
-        parts = Path(rel).parts
-        domain = parts[1] if len(parts) > 2 else "knowledge"
-        links = markdown_xid_links(text)
-        entries.append(
-            KnowledgeCatalogEntry(
-                xid=xid,
-                version=1,
-                content_hash=stable_hash(text),
-                revised_at=git_last_modified(root, path),
-                title=first_heading(text, path.stem),
-                domain=domain,
-                summary=first_paragraph(text),
-                applies_when=[],
-                requires_knowledge=links,
-                related_skills=[],
-                related_capabilities=[],
-                path=rel,
-                missing=missing,
-            )
-        )
-    return entries
+def _knowledge_entry(root: Path, path: Path, text: str) -> KnowledgeCatalogEntry:
+    xid = first_xid(text)
+    missing: list[str] = []
+    if not xid:
+        xid = f"path:{relative_to_repo(path, root)}"
+        missing.append("xid")
+    rel = relative_to_repo(path, root)
+    parts = Path(rel).parts
+    domain = parts[1] if len(parts) > 2 else "knowledge"
+    links = markdown_xid_links(text)
+    return KnowledgeCatalogEntry(
+        xid=xid,
+        version=1,
+        content_hash=stable_hash(text),
+        revised_at=file_last_modified(path),
+        title=first_heading(text, path.stem),
+        domain=domain,
+        summary=first_paragraph(text),
+        applies_when=[],
+        requires_knowledge=links,
+        related_skills=[],
+        related_capabilities=[],
+        path=rel,
+        missing=missing,
+    )
 
 
 def _managed_markdown_files(root: Path) -> list[Path]:
@@ -749,13 +773,6 @@ def _startup_contract_pack(references: list[StartupReference]) -> dict[str, obje
         "pack_hash": startup_contract_pack_hash(),
         "body": normalized_startup_contract_pack_body(),
     }
-
-
-def _fresh_skill_entry(entry: SkillCatalogEntry, root: Path) -> SkillCatalogEntry:
-    meta_path = root / entry.meta_path
-    if not meta_path.exists():
-        return entry
-    return _build_skill_entry(root, meta_path)
 
 
 def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
@@ -1099,8 +1116,9 @@ def _client_obligations() -> list[ClientObligation]:
             enforcement_owner="server",
             verification=(
                 "get_document_by_xid, get_skill, get_skill_requirements, "
-                "list_workflows, expand_knowledge, get_knowledge_summary, and "
-                "build_knowledge_context reject the call for any MCP session "
+                "list_workflows, expand_knowledge, get_knowledge_summary, "
+                "build_knowledge_context, and list_skills with "
+                "include_content=true reject the call for any MCP session "
                 "that has not first called get_startup_context"
             ),
         ),

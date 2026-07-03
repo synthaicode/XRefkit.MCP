@@ -69,6 +69,28 @@ class McpClientIntegrationTests(unittest.TestCase):
                         rejected_fm_result.content[0].text,
                     )
 
+                    rejected_bodies_result = await session.call_tool(
+                        "list_skills",
+                        {"include_content": True, "limit": 1},
+                    )
+                    self.assertTrue(rejected_bodies_result.isError)
+                    self.assertIn(
+                        "XREFKIT_STARTUP_REQUIRED",
+                        rejected_bodies_result.content[0].text,
+                    )
+
+                    metadata_skills_result = await session.call_tool(
+                        "list_skills",
+                        {"limit": 1},
+                    )
+                    self.assertFalse(metadata_skills_result.isError)
+                    metadata_entry = metadata_skills_result.structuredContent[
+                        "result"
+                    ][0]
+                    self.assertIsNone(metadata_entry["meta_content"])
+                    self.assertIsNone(metadata_entry["skill_content"])
+                    self.assertTrue(metadata_entry["document_versions"])
+
                     startup_result = await session.call_tool("get_startup_context", {})
                     startup = startup_result.structuredContent
                     self.assertEqual(

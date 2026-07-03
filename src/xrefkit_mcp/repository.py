@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -20,9 +21,61 @@ def stable_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def repository_fingerprint(repo_root: Path) -> str:
+def repository_identity(repo_root: Path) -> tuple[str, str]:
+    """Return (fingerprint, basis) identifying the repository's content lineage.
+
+    Basis preference:
+
+    1. ``git_root_commits`` — the root commit(s) of HEAD's history. Every
+       full clone of the same repository shares them regardless of path,
+       host, or branch, so caches keyed by this fingerprint are shared
+       across machines and survive checkout moves. Multiple roots (merged
+       histories) are sorted and joined for determinism.
+    2. ``resolved_repository_root`` — path fallback for non-git
+       directories, repositories without commits, and shallow clones
+       (whose grafted history would misreport the true root commit).
+    """
+    root_commits = _git_root_commits(repo_root)
+    if root_commits:
+        seed = "git-root-commits:" + ",".join(root_commits)
+        return stable_hash(seed)[:32], "git_root_commits"
     normalized_root = repo_root.resolve().as_posix().casefold()
-    return stable_hash(f"resolved-repository-root:{normalized_root}")[:32]
+    seed = f"resolved-repository-root:{normalized_root}"
+    return stable_hash(seed)[:32], "resolved_repository_root"
+
+
+def repository_fingerprint(repo_root: Path) -> str:
+    return repository_identity(repo_root)[0]
+
+
+def _git_root_commits(repo_root: Path) -> list[str]:
+    if _git_is_shallow(repo_root):
+        return []
+    output = _git_stdout(repo_root, ["rev-list", "--max-parents=0", "HEAD"])
+    if output is None:
+        return []
+    return sorted(line.strip() for line in output.splitlines() if line.strip())
+
+
+def _git_is_shallow(repo_root: Path) -> bool:
+    output = _git_stdout(repo_root, ["rev-parse", "--is-shallow-repository"])
+    return output is not None and output.strip() == "true"
+
+
+def _git_stdout(repo_root: Path, arguments: list[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *arguments],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def first_xid(text: str) -> str | None:
@@ -86,20 +139,24 @@ def relative_to_repo(path: Path, repo_root: Path) -> str:
     return path.resolve().relative_to(repo_root.resolve()).as_posix()
 
 
-def git_last_modified(repo_root: Path, path: Path) -> str | None:
-    rel = relative_to_repo(path, repo_root)
+def file_last_modified(path: Path) -> str | None:
+    """UTC ISO timestamp of the file's last modification on this checkout.
+
+    Derived from the filesystem, not from git history: catalog entries are
+    rebuilt from the live repository inside MCP request handlers, and
+    spawning a git subprocess there hangs the stdio transport on Windows
+    (the tool result is computed but the response never reaches the
+    client). revised_at is advisory metadata, so the checkout's mtime is an
+    acceptable and subprocess-free source.
+    """
     try:
-        result = subprocess.run(
-            ["git", "log", "-1", "--format=%cI", "--", rel],
-            cwd=repo_root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        stat = path.stat()
     except OSError:
         return None
-    value = result.stdout.strip()
-    return value or None
+    return (
+        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        .isoformat(timespec="seconds")
+    )
 
 
 def parse_meta_bullets(text: str) -> dict[str, object]:

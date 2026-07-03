@@ -49,6 +49,49 @@ restructured: Option A NuGet install (preferred, incl. /dist-mirrored
 nupkg for closed networks), Option B build from source, maintainer
 publishing section. MCP distribution warnings now name the package.
 
+Follow-up event (same day, later still): fixed the repository_fingerprint
+identity problem. Fingerprint is now derived from the git root commit(s)
+of HEAD's history (fingerprint_basis git_root_commits, scope
+shared_across_clones) so all full clones share one cache namespace across
+paths and machines; non-git directories, commitless repositories, and
+shallow clones fall back to the old resolved-path basis (scope
+local_path_only), and get_repository_identity reports basis and scope
+honestly. Cache safety is unchanged (content_hash still validates every
+entry); upgrading servers start one fresh namespace (old cache dirs
+orphaned, not corrupted). 8 new tests incl. clone-shares-fingerprint and
+shallow-clone fallback; 73 total pass.
+
+Follow-up event (same day, freshness fix): unified the catalog freshness
+model. knowledge, skills, and catalog_version are now properties rebuilt
+from the live repository on every access (one read per file, so entry
+content_hash and body can never disagree — this removes the
+expand_knowledge stale-hash bug), matching get_document_by_xid's live
+reads. Files added/removed after server start now appear/disappear
+without a restart; the frozen build-time snapshot and _fresh_skill_entry
+are gone. Regression tests added (FreshnessTests in test_catalog.py).
+
+Incident during the fix: moving knowledge scans into request handlers made
+every knowledge tool spawn `git log` per file (revised_at), and a git
+subprocess spawned inside a request handler hangs the stdio transport on
+Windows — the tool completes but the response never reaches the client
+(diagnosed by bisection: list_skills [no subprocess] responded in 0.1s,
+search_knowledge_catalog [git spawns] timed out; the direct in-process
+call took 2.5s). Resolution: no subprocess in any request path —
+revised_at now comes from the file's mtime on the serving checkout
+(repository.file_last_modified), git_last_modified was removed, and
+repository_identity's git calls remain build-time only. get_startup_context
+went from 2.5s (cold) to 0.2s as a side effect. 78 tests pass in ~11s.
+
+Follow-up event (same day, list_skills gating): list_skills now defaults
+to include_content=False (metadata-only, with document_versions for cache
+negotiation), and include_content=true requires get_startup_context first
+(XREFKIT_STARTUP_REQUIRED otherwise), closing the hole where one ungated
+call returned every SKILL.md body before startup. Metadata-only routing
+tools stay ungated by design. Tool contract xref.list_skills bumped to v3;
+CLI flag flipped from --exclude-content to --include-content; obligation
+verification text and README updated; catalog + integration tests added
+(80 total pass).
+
 ## Decision
 
 Human accepted the proposal: MCP channel = governance context only; plain
@@ -65,10 +108,10 @@ bytes must not consume model context; clients may reach only the MCP server
 
 - Startup contract pack drift detection (`based_on_hashes` or moving the
   pack body into the XRefKit repo).
-- `expand_knowledge` freshness fix (frozen `content_hash` with live content).
-- `list_skills` default `include_content=False` and gating alignment.
 - Authentication in front of `/dist` (currently TLS + reverse proxy
   guidance only, documented in README Security Notes).
+- (Resolved later the same day: expand_knowledge freshness fix and
+  list_skills default/gating — see follow-up events above.)
 
 ## Open
 

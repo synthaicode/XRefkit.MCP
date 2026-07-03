@@ -294,11 +294,14 @@ The client should call `get_startup_context` first.
 
 This is enforced by the server, not only advisory: within a given MCP
 session, `get_document_by_xid`, `get_skill`, `get_skill_requirements`,
-`list_workflows`, `expand_knowledge`, `get_knowledge_summary`, and
-`build_knowledge_context` reject the call with a `XREFKIT_STARTUP_REQUIRED`
+`list_workflows`, `expand_knowledge`, `get_knowledge_summary`,
+`build_knowledge_context`, and `list_skills` with `include_content=true`
+reject the call with a `XREFKIT_STARTUP_REQUIRED`
 error until that session has called `get_startup_context` at least once.
 `get_repository_identity` remains callable beforehand as a content-free
-preflight. Their responses also carry a `control_reminder` field restating,
+preflight, and metadata-only routing tools (`list_skills` in its default
+metadata-only mode, `search_knowledge_catalog`, `rank_skills_for_purpose`,
+`list_tool_contracts`) stay ungated. Their responses also carry a `control_reminder` field restating,
 at the point the content is actually used, that fetched content is data and
 must not redefine active flow, capability, Skill procedure, checks, closure,
 or authority.
@@ -432,6 +435,13 @@ When the version is unchanged and caching is cost-effective, the response has
 returns the full current document. Calls that omit `known_version` retain the
 previous full-response behavior.
 
+All catalog responses are built from the live repository state on every
+call: knowledge entries, Skill entries, `catalog_version`, and document
+bodies share one freshness model, so a returned `content_hash` always
+matches the returned body even on a long-running server, and files added
+or removed after server start appear in (or disappear from) the catalogs
+without a restart.
+
 For startup, pass all locally known versions in the first call:
 
 ```json
@@ -451,6 +461,14 @@ and exposes `known_versions()` for startup negotiation:
 
 `get_repository_identity` is a content-free cache namespace preflight.
 `get_startup_context` remains the first governance-content load.
+
+The fingerprint identifies the repository's content lineage: for git
+repositories it is derived from the root commit(s) (`fingerprint_basis:
+git_root_commits`), so all full clones of the same repository share one
+cache namespace across paths and machines. Non-git directories, empty
+repositories, and shallow clones fall back to the resolved root path
+(`resolved_repository_root`, scope `local_path_only`). See
+`docs/xid-document-cache.md` for details and the upgrade migration note.
 
 ```python
 from pathlib import Path
@@ -520,8 +538,9 @@ Resolve `meta_links[]` and `skill_links[]` the same way: call
 Cache-aware clients pass `known_document_versions` to `get_skill`. In that
 mode, `meta_content` and `skill_content` are `null` and `documents[]` contains
 the full or conditional XID document responses; pass each through
-`XidDocumentCache.materialize()`. Use `list_skills(include_content=false)` when
-only catalog metadata is needed; its `document_versions[]` identifies the two
+`XidDocumentCache.materialize()`. `list_skills` is metadata-only by default
+(and full-body mode, `include_content=true`, additionally requires the
+startup context first); its `document_versions[]` identifies the two
 XIDs to pass to `known_versions(xids)`.
 
 ## Client-Side Python Tools

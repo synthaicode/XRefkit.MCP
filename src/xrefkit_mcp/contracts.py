@@ -98,13 +98,17 @@ def builtin_tool_contracts() -> list[ToolContract]:
         ToolContract(
             tool_id="xref.list_skills",
             provider="xrefkit-mcp",
-            version="2",
+            version="3",
             execution_location="server",
             side_effects="none",
             input_schema={"limit": "integer?", "include_content": "boolean?"},
             output_schema={"entries": "skill_catalog_entries"},
             requires_workspace=True,
-            required_when="Available Skills must be listed without executing them.",
+            required_when=(
+                "Available Skills must be listed without executing them. "
+                "Metadata-only by default; include_content=true returns "
+                "procedure bodies and requires get_startup_context first."
+            ),
             response_envelope="mcp_result_array",
         ),
         ToolContract(

@@ -232,9 +232,16 @@ def main(argv: list[str] | None = None) -> int:
 
     @app.tool()
     def list_skills(
+        ctx: Context,
         limit: int | None = None,
-        include_content: bool = True,
+        include_content: bool = False,
     ) -> list[dict[str, Any]]:
+        # Metadata-only listing stays ungated as a routing surface (like
+        # search_knowledge_catalog and rank_skills_for_purpose); full
+        # procedure bodies are governance content and require the startup
+        # context first, matching get_skill.
+        if include_content:
+            _require_startup_loaded(ctx, "list_skills(include_content=true)")
         return catalog.list_skills(limit, include_content)
 
     @app.tool()

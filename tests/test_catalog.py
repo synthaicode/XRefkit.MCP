@@ -287,6 +287,23 @@ if __name__ == "__main__":
                 self.assertEqual(document["cache_status"], "not_modified")
                 self.assertNotIn("content", document)
 
+    def test_list_skills_defaults_to_metadata_only(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+
+        skill = catalog.list_skills()[0]
+
+        self.assertIsNone(skill["meta_content"])
+        self.assertIsNone(skill["skill_content"])
+        self.assertTrue(skill["document_versions"])
+
+    def test_list_skills_returns_bodies_only_when_requested(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+
+        skill = catalog.list_skills(include_content=True)[0]
+
+        self.assertIn("Skill: sample_review", skill["skill_content"])
+        self.assertIn("skill_id", skill["meta_content"])
+
     def test_list_skills_can_exclude_document_bodies(self) -> None:
         catalog = XRefCatalog.build(self.repo)
 
@@ -673,3 +690,108 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FreshnessTests(unittest.TestCase):
+    """All catalog accessors must reflect the live repository state.
+
+    Regression tests for the frozen build-time snapshot that let
+    expand_knowledge return a stale content_hash next to a live body,
+    breaking the client cache protocol on long-running servers.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp_dir.name)
+        write(
+            self.repo / "knowledge" / "organization" / "rules.md",
+            """<!-- xid: FRESH01 -->
+<a id="xid-FRESH01"></a>
+
+# Original Title
+
+Original summary paragraph.
+""",
+        )
+        write(
+            self.repo / "skills" / "first" / "meta.md",
+            "- skill_id: `first_skill`\n- summary: first skill\n- skill_doc: `./SKILL.md`\n",
+        )
+        write(self.repo / "skills" / "first" / "SKILL.md", "# Skill: first_skill\n")
+        self.catalog = XRefCatalog.build(self.repo)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_expand_knowledge_hash_matches_body_after_edit(self) -> None:
+        write(
+            self.repo / "knowledge" / "organization" / "rules.md",
+            """<!-- xid: FRESH01 -->
+<a id="xid-FRESH01"></a>
+
+# Edited Title
+
+Edited summary paragraph.
+""",
+        )
+
+        expanded = self.catalog.expand_knowledge("FRESH01")
+
+        self.assertEqual(
+            expanded["entry"]["content_hash"],
+            hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(expanded["entry"]["title"], "Edited Title")
+        self.assertIn("Edited summary", expanded["content"])
+
+    def test_knowledge_catalog_reflects_files_added_after_build(self) -> None:
+        write(
+            self.repo / "knowledge" / "organization" / "added.md",
+            "<!-- xid: FRESH02 -->\n\n# Added Later\n\nAdded body.\n",
+        )
+
+        xids = [entry["xid"] for entry in self.catalog.list_knowledge_catalog()]
+
+        self.assertIn("FRESH02", xids)
+        self.assertEqual(
+            self.catalog.expand_knowledge("FRESH02")["entry"]["title"],
+            "Added Later",
+        )
+
+    def test_skill_catalog_reflects_additions_and_removals_after_build(self) -> None:
+        write(
+            self.repo / "skills" / "second" / "meta.md",
+            "- skill_id: `second_skill`\n- summary: second skill\n- skill_doc: `./SKILL.md`\n",
+        )
+        write(self.repo / "skills" / "second" / "SKILL.md", "# Skill: second_skill\n")
+        (self.repo / "skills" / "first" / "meta.md").unlink()
+
+        skill_ids = [entry["skill_id"] for entry in self.catalog.list_skills()]
+
+        self.assertIn("second_skill", skill_ids)
+        self.assertNotIn("first_skill", skill_ids)
+
+    def test_catalog_version_changes_when_content_changes(self) -> None:
+        before = self.catalog.catalog_version
+
+        write(
+            self.repo / "knowledge" / "organization" / "rules.md",
+            "<!-- xid: FRESH01 -->\n\n# Edited Title\n\nEdited.\n",
+        )
+
+        self.assertNotEqual(self.catalog.catalog_version, before)
+
+    def test_build_knowledge_context_bodies_match_their_hashes(self) -> None:
+        write(
+            self.repo / "knowledge" / "organization" / "rules.md",
+            "<!-- xid: FRESH01 -->\n\n# Edited Title\n\nEdited context body.\n",
+        )
+
+        context = self.catalog.build_knowledge_context("edited title", limit=2)
+
+        self.assertTrue(context["entries"])
+        for expanded in context["entries"]:
+            self.assertEqual(
+                expanded["entry"]["content_hash"],
+                hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
+            )
