@@ -11,51 +11,60 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="xrefkit-mcp-catalog")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    def add_repo_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--repo", required=True)
+        command.add_argument(
+            "--domain-knowledge-root",
+            action="append",
+            default=[],
+            help="External XID-addressable domain knowledge root. Can be repeated.",
+        )
+
     catalog = sub.add_parser("catalog", help="build and print catalog summary")
-    catalog.add_argument("--repo", required=True)
+    add_repo_arguments(catalog)
 
     identity = sub.add_parser(
         "repository-identity",
         help="print the repository cache identity",
     )
-    identity.add_argument("--repo", required=True)
+    add_repo_arguments(identity)
 
     startup = sub.add_parser("startup-context", help="print required startup references")
-    startup.add_argument("--repo", required=True)
+    add_repo_arguments(startup)
 
     pack_hashes = sub.add_parser(
         "startup-pack-hashes",
         help="print the Based On hash lines for the startup contract pack document",
     )
-    pack_hashes.add_argument("--repo", required=True)
+    add_repo_arguments(pack_hashes)
 
     pack_check = sub.add_parser(
         "check-startup-pack",
         help="exit non-zero when the startup contract pack is stale against its sources",
     )
-    pack_check.add_argument("--repo", required=True)
+    add_repo_arguments(pack_check)
 
     knowledge = sub.add_parser("search-knowledge", help="search knowledge catalog")
-    knowledge.add_argument("--repo", required=True)
+    add_repo_arguments(knowledge)
     knowledge.add_argument("--query", required=True)
     knowledge.add_argument("--limit", type=int, default=10)
 
     expand = sub.add_parser("expand-knowledge", help="expand one knowledge body")
-    expand.add_argument("--repo", required=True)
+    add_repo_arguments(expand)
     expand.add_argument("--xid", required=True)
 
     document = sub.add_parser("get-document", help="expand any managed Markdown document by XID")
-    document.add_argument("--repo", required=True)
+    add_repo_arguments(document)
     document.add_argument("--xid", required=True)
     document.add_argument("--known-version")
 
     context = sub.add_parser("build-knowledge-context", help="expand bounded knowledge context")
-    context.add_argument("--repo", required=True)
+    add_repo_arguments(context)
     context.add_argument("--query", required=True)
     context.add_argument("--limit", type=int, default=5)
 
     skills = sub.add_parser("list-skills", help="list Skill catalog")
-    skills.add_argument("--repo", required=True)
+    add_repo_arguments(skills)
     skills.add_argument("--limit", type=int)
     skills.add_argument(
         "--include-content",
@@ -64,32 +73,32 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     skill = sub.add_parser("get-skill", help="get one Skill catalog entry with transferred content")
-    skill.add_argument("--repo", required=True)
+    add_repo_arguments(skill)
     skill.add_argument("--skill-id", required=True)
 
     rank = sub.add_parser("rank-skills", help="rank Skill candidates for a purpose")
-    rank.add_argument("--repo", required=True)
+    add_repo_arguments(rank)
     rank.add_argument("--purpose", required=True)
     rank.add_argument("--limit", type=int, default=5)
 
     contracts = sub.add_parser("tool-contracts", help="list read-only tool contracts")
-    contracts.add_argument("--repo", required=True)
+    add_repo_arguments(contracts)
 
     tool_manifest = sub.add_parser("client-tool-manifest", help="list distributable client-side tool files")
-    tool_manifest.add_argument("--repo", required=True)
+    add_repo_arguments(tool_manifest)
 
     tool_file = sub.add_parser("get-client-tool-file", help="get one distributable client-side tool file")
-    tool_file.add_argument("--repo", required=True)
+    add_repo_arguments(tool_file)
     tool_file.add_argument("--path", required=True)
 
     tool_bundle = sub.add_parser("client-tool-bundle", help="get all distributable client-side tool files")
-    tool_bundle.add_argument("--repo", required=True)
+    add_repo_arguments(tool_bundle)
 
     tool_package = sub.add_parser("client-tool-pip-package", help="get a pip-installable client tool package")
-    tool_package.add_argument("--repo", required=True)
+    add_repo_arguments(tool_package)
 
     version_check = sub.add_parser("check-client-tool-versions", help="check installed client tool versions")
-    version_check.add_argument("--repo", required=True)
+    add_repo_arguments(version_check)
     version_check.add_argument(
         "--installed",
         action="append",
@@ -98,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
-    model = XRefCatalog.build(Path(args.repo))
+    model = XRefCatalog.build(Path(args.repo), args.domain_knowledge_root)
 
     if args.command == "catalog":
         payload = {

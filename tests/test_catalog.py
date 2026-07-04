@@ -418,6 +418,65 @@ Duplicate body.
         self.assertEqual(expanded["entry"]["title"], "Context Rules")
         self.assertIn("external input", expanded["content"])
 
+    def test_external_domain_knowledge_root_is_available_by_xid_without_path_leak(self) -> None:
+        external_root = self.repo.parent / "domain-store"
+        write(
+            external_root / "billing" / "api-naming.md",
+            """<!-- xid: EXTDOMAIN01 -->
+<a id="xid-EXTDOMAIN01"></a>
+
+# Billing API Naming
+
+Use invoice command names for billing operations.
+""",
+        )
+        catalog = XRefCatalog.build(self.repo, [external_root])
+
+        listed = catalog.list_knowledge_catalog()
+        external_entry = next(entry for entry in listed if entry["xid"] == "EXTDOMAIN01")
+        expanded = catalog.expand_knowledge("EXTDOMAIN01")
+        document = catalog.get_document_by_xid("EXTDOMAIN01")
+
+        self.assertEqual(external_entry["domain"], "billing")
+        self.assertEqual(external_entry["zone_metadata"]["zone"], "external_domain_knowledge")
+        self.assertNotIn("path", external_entry)
+        self.assertNotIn(str(external_root), repr(listed))
+        self.assertIn("invoice command names", expanded["content"])
+        self.assertNotIn("path", expanded["entry"])
+        self.assertNotIn(str(external_root), repr(expanded))
+        self.assertIn("# Billing API Naming", document["content"])
+        self.assertNotIn("path", document)
+        self.assertNotIn(str(external_root), repr(document))
+
+    def test_external_domain_knowledge_xid_conflict_fails_closed_without_external_path(self) -> None:
+        external_root = self.repo.parent / "domain-store"
+        write(
+            external_root / "duplicate.md",
+            """<!-- xid: ABC123 -->
+<a id="xid-ABC123"></a>
+
+# External Duplicate
+
+Duplicate external body.
+""",
+        )
+        catalog = XRefCatalog.build(self.repo, [external_root])
+
+        result = catalog.get_document_by_xid("ABC123")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("xid_conflict", result["error"])
+        self.assertEqual(2, len(result["matches"]))
+        self.assertEqual(
+            ["external_domain_knowledge", "repository"],
+            sorted(match["source"] for match in result["matches"]),
+        )
+        external_match = next(
+            match for match in result["matches"] if match["source"] == "external_domain_knowledge"
+        )
+        self.assertNotIn("path", external_match)
+        self.assertNotIn(str(external_root), repr(result))
+
     def test_ranks_skills_without_selecting_one(self) -> None:
         catalog = XRefCatalog.build(self.repo)
 
@@ -1090,6 +1149,23 @@ Edited summary paragraph.
         )
 
         self.assertNotEqual(self.catalog.catalog_version, before)
+
+    def test_catalog_version_changes_when_external_domain_knowledge_changes(self) -> None:
+        external_root = self.repo.parent / "domain-store"
+        external_file = external_root / "billing.md"
+        write(
+            external_file,
+            "<!-- xid: EXTFRESH01 -->\n\n# External Original\n\nOriginal.\n",
+        )
+        catalog = XRefCatalog.build(self.repo, [external_root])
+        before = catalog.catalog_version
+
+        write(
+            external_file,
+            "<!-- xid: EXTFRESH01 -->\n\n# External Edited\n\nEdited.\n",
+        )
+
+        self.assertNotEqual(catalog.catalog_version, before)
 
     def test_build_knowledge_context_bodies_match_their_hashes(self) -> None:
         write(

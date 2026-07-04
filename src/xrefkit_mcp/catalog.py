@@ -113,12 +113,20 @@ class XRefCatalog:
     fingerprint_basis: str
     tools: list[ToolContract]
     ownership: Ownership | None = None
+    domain_knowledge_roots: tuple[Path, ...] = ()
 
     @classmethod
-    def build(cls, repo_root: str | Path) -> "XRefCatalog":
+    def build(
+        cls,
+        repo_root: str | Path,
+        domain_knowledge_roots: list[str | Path] | tuple[str | Path, ...] | None = None,
+    ) -> "XRefCatalog":
         root = Path(repo_root).resolve()
         if not root.exists():
             raise FileNotFoundError(root)
+        external_roots = tuple(
+            _resolve_domain_knowledge_root(path) for path in (domain_knowledge_roots or [])
+        )
         fingerprint, fingerprint_basis = repository_identity(root)
         ownership = load_ownership(root)
         if ownership is not None:
@@ -131,6 +139,7 @@ class XRefCatalog:
             fingerprint_basis=fingerprint_basis,
             tools=builtin_tool_contracts(),
             ownership=ownership,
+            domain_knowledge_roots=external_roots,
         )
 
     # knowledge, skills, and catalog_version are rebuilt from the live
@@ -165,6 +174,12 @@ class XRefCatalog:
         for path in _content_files(self.repo_root, self.ownership, "knowledge", "*.md"):
             text = read_text(path)
             entries.append((_knowledge_entry(self.repo_root, self.ownership, path, text), text))
+        for root in self.domain_knowledge_roots:
+            for path in _external_knowledge_files(root):
+                text = read_text(path)
+                if not first_xid(text):
+                    continue
+                entries.append((_external_knowledge_entry(root, path, text), text))
         return entries
 
     def get_repository_identity(self) -> dict[str, str]:
@@ -521,6 +536,7 @@ class XRefCatalog:
         known_version: str | None = None,
     ) -> dict:
         matches = _managed_markdown_matches_by_xid(self.repo_root, self.ownership, xid)
+        matches.extend(_external_markdown_matches_by_xid(self.domain_knowledge_roots, xid))
         if len(matches) > 1:
             return {
                 "ok": False,
@@ -528,18 +544,14 @@ class XRefCatalog:
                 "xid": xid,
                 "message": "multiple catalog-visible documents declare this XID; refusing path-order selection",
                 "matches": [
-                    {
-                        "path": relative_to_repo(path, self.repo_root),
-                        "content_hash": _xref_document(path, self.repo_root, text).content_hash,
-                        "zone_metadata": _zone_metadata(self.ownership, relative_to_repo(path, self.repo_root)),
-                    }
+                    _document_conflict_match(self.repo_root, self.ownership, path, text)
                     for path, text in matches
                 ],
             }
         if len(matches) == 1:
             path, text = matches[0]
             return _conditional_document_response(
-                _xref_document(path, self.repo_root, text),
+                _xref_document_for_catalog(self.repo_root, self.domain_knowledge_roots, path, text),
                 known_version,
                 self.repository_fingerprint,
             )
@@ -661,9 +673,17 @@ class XRefCatalog:
         ).to_dict()
 
     def _knowledge_by_xid(self, xid: str) -> tuple[KnowledgeCatalogEntry, str]:
+        matches: list[tuple[KnowledgeCatalogEntry, str]] = []
         for entry, text in self._scan_knowledge():
             if entry.xid == xid:
-                return entry, text
+                matches.append((entry, text))
+        if len(matches) > 1:
+            raise ValueError(
+                "knowledge xid conflict: "
+                f"{xid} appears in multiple catalog-visible knowledge entries"
+            )
+        if len(matches) == 1:
+            return matches[0]
         raise KeyError(f"knowledge xid not found: {xid}")
 
     def _skill_by_id(self, skill_id: str) -> SkillCatalogEntry:
@@ -783,6 +803,58 @@ def _knowledge_entry(
     )
 
 
+def _external_knowledge_entry(root: Path, path: Path, text: str) -> KnowledgeCatalogEntry:
+    xid = first_xid(text)
+    if not xid:
+        raise ValueError(f"external domain knowledge must declare an XID: {path}")
+    rel = _external_relative_path(root, path)
+    parts = Path(rel).parts
+    domain = parts[0] if len(parts) > 1 else "external_domain_knowledge"
+    logical_path = f"external-domain-knowledge/{stable_hash(str(root))[:12]}/{rel}"
+    return KnowledgeCatalogEntry(
+        xid=xid,
+        version=1,
+        content_hash=stable_hash(text),
+        revised_at=file_last_modified(path),
+        title=first_heading(text, path.stem),
+        domain=domain,
+        summary=first_paragraph(text),
+        applies_when=[],
+        requires_knowledge=markdown_xid_links(text),
+        related_skills=[],
+        related_capabilities=[],
+        path=logical_path,
+        missing=[],
+        zone_metadata={
+            "ownership_enabled": False,
+            "zone": "external_domain_knowledge",
+            "owner": None,
+            "pack_id": None,
+            "local_only": False,
+            "catalog": True,
+            "distribution": True,
+            "shadowing": False,
+        },
+    )
+
+
+def _resolve_domain_knowledge_root(path: str | Path) -> Path:
+    root = Path(path).expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(root)
+    if not root.is_dir():
+        raise NotADirectoryError(root)
+    return root
+
+
+def _external_knowledge_files(root: Path) -> list[Path]:
+    return sorted(path for path in root.glob("**/*.md") if path.is_file())
+
+
+def _external_relative_path(root: Path, path: Path) -> str:
+    return path.resolve().relative_to(root).as_posix()
+
+
 def _managed_markdown_files(root: Path, ownership: Ownership | None = None) -> list[Path]:
     files: list[Path] = []
     for dirname in ["agent", "docs", "knowledge", "skills"]:
@@ -822,6 +894,19 @@ def _managed_markdown_matches_by_xid(
     return matches
 
 
+def _external_markdown_matches_by_xid(
+    roots: tuple[Path, ...],
+    xid: str,
+) -> list[tuple[Path, str]]:
+    matches: list[tuple[Path, str]] = []
+    for root in roots:
+        for path in _external_knowledge_files(root):
+            text = read_text(path)
+            if first_xid(text) == xid:
+                matches.append((path, text))
+    return matches
+
+
 def _duplicate_skill_ids(entries: list[SkillCatalogEntry]) -> dict[str, list[str]]:
     by_id: dict[str, list[str]] = {}
     for entry in entries:
@@ -843,6 +928,75 @@ def _xref_document(path: Path, root: Path, text: str) -> XRefDocument:
         links=markdown_xid_link_targets(text),
         content_hash=stable_hash(content),
     )
+
+
+def _external_xref_document(path: Path, text: str) -> XRefDocument:
+    xid = first_xid(text)
+    if not xid:
+        raise ValueError(f"external domain knowledge must declare an XID: {path}")
+    content = markdown_xid_only_text(text)
+    return XRefDocument(
+        xid=xid,
+        title=first_heading(text, path.stem),
+        path=f"external-domain-knowledge/{xid}.md",
+        summary=first_paragraph(text),
+        content=content,
+        links=markdown_xid_link_targets(text),
+        content_hash=stable_hash(content),
+    )
+
+
+def _path_in_roots(path: Path, roots: tuple[Path, ...]) -> bool:
+    resolved = path.resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _xref_document_for_catalog(
+    repo_root: Path,
+    external_roots: tuple[Path, ...],
+    path: Path,
+    text: str,
+) -> XRefDocument:
+    if _path_in_roots(path, external_roots):
+        return _external_xref_document(path, text)
+    return _xref_document(path, repo_root, text)
+
+
+def _document_conflict_match(
+    repo_root: Path,
+    ownership: Ownership | None,
+    path: Path,
+    text: str,
+) -> dict[str, object]:
+    try:
+        rel = relative_to_repo(path, repo_root)
+    except ValueError:
+        return {
+            "source": "external_domain_knowledge",
+            "content_hash": _external_xref_document(path, text).content_hash,
+            "zone_metadata": {
+                "ownership_enabled": False,
+                "zone": "external_domain_knowledge",
+                "owner": None,
+                "pack_id": None,
+                "local_only": False,
+                "catalog": True,
+                "distribution": True,
+                "shadowing": False,
+            },
+        }
+    return {
+        "source": "repository",
+        "path": rel,
+        "content_hash": _xref_document(path, repo_root, text).content_hash,
+        "zone_metadata": _zone_metadata(ownership, rel),
+    }
 
 
 def _conditional_document_response(

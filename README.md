@@ -58,7 +58,8 @@ The MCP server publishes:
 The server sends read-only definitions and packages only:
 
 - startup/base-control Markdown content
-- knowledge catalog entries from `knowledge/**/*.md`
+- knowledge catalog entries from `knowledge/**/*.md` and configured external
+  XID-addressable domain knowledge roots
 - Skill metadata and `SKILL.md` content from `skills/**`
 - distributable Python tool files from `tools/**/*.py` for client-side execution
 - the `fm/**/*.py` Skill-execution runtime for client-side execution
@@ -118,7 +119,8 @@ xrefkit-mcp-server `
   --repo C:\dev\itsm\XRefKit `
   --transport streamable-http `
   --host 0.0.0.0 `
-  --port 8000
+  --port 8000 `
+  --domain-knowledge-root C:\dev\domain-knowledge\billing
 ```
 
 The client URL is:
@@ -694,6 +696,7 @@ backward compatibility.
 
 ```powershell
 xrefkit-mcp-catalog startup-context --repo C:\dev\itsm\XRefKit
+xrefkit-mcp-catalog search-knowledge --repo C:\dev\itsm\XRefKit --domain-knowledge-root C:\dev\domain-knowledge\billing --query "billing API naming"
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121 --known-version <cached-content-hash>
 xrefkit-mcp-catalog get-skill --repo C:\dev\itsm\XRefKit --skill-id csharp_review
