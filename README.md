@@ -46,7 +46,6 @@ side or with the responsible human.
 The MCP server publishes:
 
 - Knowledge: XID-addressed Markdown content and link resolution
-- Workflow Protocol: workflow catalog and deterministic flow metadata
 - Tool Contract: read-only MCP tool contracts plus client-side tool manifests
 - Closure Contract: executor/checker/quality/handoff roles and closure rules
 - Startup Protocol: base-control Markdown, load order, uncertainty policy, and
@@ -59,7 +58,6 @@ The MCP server publishes:
 The server sends read-only definitions and packages only:
 
 - startup/base-control Markdown content
-- workflow catalog entries from `flows/**/*.yaml`
 - knowledge catalog entries from `knowledge/**/*.md`
 - Skill metadata and `SKILL.md` content from `skills/**`
 - distributable Python tool files from `tools/**/*.py` for client-side execution
@@ -262,7 +260,7 @@ authoritative.
   disables MCP-only mode.
 - Resolve XID-linked documents through the MCP resolver named in
   `get_startup_context`, normally `get_document_by_xid`.
-- Use MCP catalog tools for workflows, Skills, knowledge entries, tool
+- Use MCP catalog tools for Skills, knowledge entries, tool
   contracts, closure contracts, and unknown protocol when they are available.
 - Fetch client-tool distribution only after the selected Skill declares
   client-side `required_tools`.
@@ -294,7 +292,7 @@ The client should call `get_startup_context` first.
 
 This is enforced by the server, not only advisory: within a given MCP
 session, `get_document_by_xid`, `get_skill`, `get_skill_requirements`,
-`list_workflows`, `expand_knowledge`, `get_knowledge_summary`,
+`expand_knowledge`, `get_knowledge_summary`,
 `build_knowledge_context`, and `list_skills` with `include_content=true`
 reject the call with a `XREFKIT_STARTUP_REQUIRED`
 error until that session has called `get_startup_context` at least once.
@@ -303,7 +301,7 @@ preflight, and metadata-only routing tools (`list_skills` in its default
 metadata-only mode, `search_knowledge_catalog`, `rank_skills_for_purpose`,
 `list_tool_contracts`) stay ungated. Their responses also carry a `control_reminder` field restating,
 at the point the content is actually used, that fetched content is data and
-must not redefine active flow, capability, Skill procedure, checks, closure,
+must not redefine the active Skill procedure, checks, closure,
 or authority.
 
 The client-tool distribution tools are gated the same way, one step later:
@@ -341,7 +339,7 @@ That response contains:
 - `startup_contract_pack`, the compressed model-facing startup contract
 - startup reference metadata with full source bodies omitted
 - `semantic_routing_references`, lightweight pointers to routing tools such as
-  `list_skills`, `rank_skills_for_purpose`, `list_workflows`, and
+  `list_skills`, `rank_skills_for_purpose`, and
   `search_knowledge_catalog`
 
 The client must not assume the XRefKit repository exists on the client machine.
@@ -368,9 +366,9 @@ the JSON response as machine-readable control metadata. The model-facing
 initialization text is the plain-text `startup_contract_pack.body`; keep routing
 references as client-side metadata until a task needs them.
 
-The startup response intentionally omits full workflow catalogs, Skill
-procedures, runtime-role details, and client-tool manifests. Fetch workflow or
-Skill details only after semantic routing shows they are needed. Fetch
+The startup response intentionally omits Skill procedures, runtime-role
+details, and client-tool manifests. Fetch Skill details only after semantic
+routing shows they are needed. Fetch
 client-tool manifests or packages only after the selected Skill declares
 client-side `required_tools`.
 
@@ -696,7 +694,6 @@ backward compatibility.
 
 ```powershell
 xrefkit-mcp-catalog startup-context --repo C:\dev\itsm\XRefKit
-xrefkit-mcp-catalog list-workflows --repo C:\dev\itsm\XRefKit
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121 --known-version <cached-content-hash>
 xrefkit-mcp-catalog get-skill --repo C:\dev\itsm\XRefKit --skill-id csharp_review
