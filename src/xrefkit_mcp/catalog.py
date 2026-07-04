@@ -105,6 +105,110 @@ STOP_TOKENS = {
     "with",
 }
 
+ROUTING_SYNONYMS = {
+    "試験計画": ("test", "planning", "plan", "test_flow"),
+    "テスト計画": ("test", "planning", "plan", "test_flow"),
+    "試験設計": ("test", "design", "test_flow"),
+    "テスト設計": ("test", "design", "test_flow"),
+    "試験項目": ("test", "item", "case"),
+    "テスト項目": ("test", "item", "case"),
+    "試験データ": ("test", "data"),
+    "テストデータ": ("test", "data"),
+    "試験環境": ("test", "environment"),
+    "テスト環境": ("test", "environment"),
+    "試験ツール": ("test", "tool"),
+    "テストツール": ("test", "tool"),
+    "テスト用ツール": ("test", "tool", "local", "domain"),
+    "試験用ツール": ("test", "tool", "local", "domain"),
+    "テスト用スクリプト": ("test", "script", "helper", "automation", "test_flow"),
+    "試験用スクリプト": ("test", "script", "helper", "automation", "test_flow"),
+    "スクリプト": ("script", "helper", "automation"),
+    "カタログ化": ("catalog", "cataloging", "test_tool_catalog_preparation"),
+    "カタログ": ("catalog", "test_tool_catalog_preparation"),
+    "用意": ("preparation", "setup"),
+    "準備": ("preparation", "setup", "implementation"),
+    "実施前": ("pre", "execution", "preparation"),
+    "実行前": ("pre", "execution", "preparation"),
+    "実行": ("execution", "run"),
+    "簡易": ("simplify", "helper", "script"),
+    "簡易化": ("simplify", "helper", "script"),
+    "証跡": ("evidence", "capture"),
+    "根拠": ("basis", "evidence"),
+    "トレーサビリティ": ("traceability", "xddp"),
+}
+
+ROUTING_CATEGORY_TERMS = {
+    "activity": {
+        "analysis",
+        "catalog",
+        "cataloging",
+        "design",
+        "implementation",
+        "execution",
+        "planning",
+        "preparation",
+        "review",
+        "run",
+        "simplify",
+    },
+    "artifact": {
+        "case",
+        "catalog",
+        "data",
+        "environment",
+        "helper",
+        "item",
+        "plan",
+        "script",
+        "test",
+        "tool",
+    },
+    "domain": {
+        "c#",
+        "csharp",
+        "database",
+        "db",
+        "dotnet",
+        "release",
+        "security",
+        "test",
+    },
+    "phase": {
+        "before",
+        "execution",
+        "implementation",
+        "pre",
+        "preparation",
+        "release",
+        "setup",
+    },
+    "evidence_trace": {
+        "basis",
+        "evidence",
+        "trace",
+        "traceability",
+        "xddp",
+    },
+    "tool_runtime": {
+        "automation",
+        "ci",
+        "fm",
+        "helper",
+        "mcp",
+        "script",
+        "tool",
+    },
+}
+
+ROUTING_CATEGORY_WEIGHTS = {
+    "activity": 0.5,
+    "artifact": 0.7,
+    "domain": 0.3,
+    "phase": 0.3,
+    "evidence_trace": 0.25,
+    "tool_runtime": 0.25,
+}
+
 
 @dataclass(frozen=True)
 class XRefCatalog:
@@ -362,6 +466,7 @@ class XRefCatalog:
 
     def rank_skills_for_purpose(self, purpose: str, limit: int = 5) -> list[dict]:
         query_tokens = _tokens(purpose)
+        query_categories = _routing_categories(query_tokens)
         results: list[SkillRankResult] = []
         available_tools = {tool.tool_id: tool.version for tool in self.tools}
         for skill in self.skills:
@@ -374,6 +479,12 @@ class XRefCatalog:
                 ("applies_when", skill.applies_when, 0.2),
                 ("summary", [skill.summary], 0.2),
                 ("inputs", skill.inputs, 0.1),
+                ("outputs", skill.outputs, 0.15),
+                (
+                    "knowledge_slots",
+                    [_knowledge_slot_text(slot) for slot in skill.knowledge_slots],
+                    0.1,
+                ),
                 # Skill-centric consolidation (084 M4): the triad is the routing
                 # vocabulary. Empty for un-migrated skills, so this is additive.
                 ("capability", [skill.capability], 0.2),
@@ -385,10 +496,26 @@ class XRefCatalog:
                     facets.extend(f"{label}={value}" for value in matched[:3])
                     score += weight
                     score += min(0.1, 0.02 * _overlap_count(query_tokens, matched))
+            matched_categories = _matched_routing_categories(skill, query_categories)
+            for category, matches in matched_categories.items():
+                category_weight = ROUTING_CATEGORY_WEIGHTS.get(category, 0.0)
+                score += category_weight
+                score += min(0.15, 0.03 * len(matches))
+                facets.extend(f"{category}={value}" for value in matches[:3])
+            if skill.skill_id in query_tokens:
+                score += 0.6
+                facets.append(f"skill_id_alias={skill.skill_id}")
+            if (
+                "activity" in matched_categories
+                and "artifact" in matched_categories
+                and _has_required_category_coverage(query_categories, matched_categories)
+            ):
+                score += 1.0
             blocked = _matched_values(query_tokens, skill.not_for, use_stop_words=True)
             if blocked:
                 facets.extend(f"not_for={value}" for value in blocked[:3])
-                score *= 0.25
+                score *= 0.75
+            score *= _category_coverage_multiplier(query_categories, matched_categories)
             if "roslyn" in query_tokens and "roslyn" in _tokens(
                 " ".join([skill.skill_id, skill.summary, *skill.applies_when])
             ):
@@ -407,10 +534,15 @@ class XRefCatalog:
                 "missing_tool_contracts": missing_tools,
                 "declared_preconditions": skill.preconditions,
             }
+            if score <= 0:
+                continue
             results.append(
                 SkillRankResult(
                     skill_id=skill.skill_id,
+                    summary=skill.summary,
+                    maturity=skill.maturity,
                     matched_facets=facets,
+                    matched_categories=matched_categories,
                     closure_preview=skill.closure_contract,
                     required_knowledge=skill.required_knowledge,
                     execution_readiness=readiness,
@@ -2306,16 +2438,143 @@ def _tokens(value: str) -> set[str]:
     normalized = (
         value.lower()
         .replace("_", " ")
+        .replace("-", " ")
         .replace("c#", "csharp")
         .replace(".net", "dotnet")
         .replace("non-roslyn", "roslyn")
     )
     tokens = {match.group(0).lower() for match in TOKEN_RE.finditer(normalized)}
+    for alias, expanded in ROUTING_SYNONYMS.items():
+        if alias.lower() in normalized:
+            tokens.update(expanded)
     if "roslyn" in tokens:
         tokens.add("diagnostics")
     if "csharp" in tokens:
         tokens.add("c#")
+    if "script" in tokens:
+        tokens.add("automation")
+    if "tool" in tokens:
+        tokens.add("tooling")
+    if "traceability" in tokens:
+        tokens.add("trace")
     return tokens
+
+
+def _knowledge_slot_text(slot: dict) -> str:
+    return " ".join(str(value) for value in slot.values() if value is not None)
+
+
+def _routing_categories(tokens: set[str]) -> dict[str, set[str]]:
+    effective_tokens = tokens - STOP_TOKENS
+    categories: dict[str, set[str]] = {}
+    for category, terms in ROUTING_CATEGORY_TERMS.items():
+        matched = effective_tokens & terms
+        if matched:
+            categories[category] = matched
+    return categories
+
+
+def _skill_values_by_category(skill: SkillCatalogEntry) -> dict[str, list[str]]:
+    closure_values = [
+        *skill.closure_contract.closure_conditions,
+        skill.closure_contract.handoff_policy,
+        skill.closure_contract.worklist_policy,
+    ]
+    knowledge_slot_values = [_knowledge_slot_text(slot) for slot in skill.knowledge_slots]
+    tool_values = [
+        " ".join(str(value) for value in tool.values() if value is not None)
+        for tool in skill.required_tools
+    ]
+    return {
+        "activity": [
+            skill.skill_id,
+            skill.summary,
+            skill.capability,
+            skill.tuning,
+            skill.responsibility,
+            *skill.intent,
+            *skill.applies_when,
+        ],
+        "artifact": [
+            skill.skill_id,
+            skill.summary,
+            *skill.target_artifacts,
+            *skill.inputs,
+            *skill.outputs,
+        ],
+        "domain": [
+            skill.skill_id,
+            skill.summary,
+            skill.tuning,
+            skill.responsibility,
+            *skill.inputs,
+            *skill.outputs,
+            *knowledge_slot_values,
+        ],
+        "phase": [
+            skill.summary,
+            *skill.applies_when,
+            *skill.inputs,
+            *skill.outputs,
+            *closure_values,
+        ],
+        "evidence_trace": [
+            skill.summary,
+            *skill.inputs,
+            *skill.outputs,
+            *closure_values,
+            *knowledge_slot_values,
+        ],
+        "tool_runtime": [
+            skill.skill_id,
+            skill.summary,
+            *skill.inputs,
+            *skill.outputs,
+            *tool_values,
+            *knowledge_slot_values,
+        ],
+    }
+
+
+def _matched_routing_categories(
+    skill: SkillCatalogEntry, query_categories: dict[str, set[str]]
+) -> dict[str, list[str]]:
+    values_by_category = _skill_values_by_category(skill)
+    matched_categories: dict[str, list[str]] = {}
+    for category, query_terms in query_categories.items():
+        values = values_by_category.get(category, [])
+        matches: list[str] = []
+        for value in values:
+            value_tokens = _tokens(value) - STOP_TOKENS
+            matched_terms = sorted(query_terms & value_tokens)
+            if matched_terms:
+                matches.append(f"{value} [{', '.join(matched_terms)}]")
+        if matches:
+            matched_categories[category] = matches[:5]
+    return matched_categories
+
+
+def _has_required_category_coverage(
+    query_categories: dict[str, set[str]], matched_categories: dict[str, list[str]]
+) -> bool:
+    for category in ["domain", "tool_runtime", "evidence_trace"]:
+        if category in query_categories and category not in matched_categories:
+            return False
+    return True
+
+
+def _category_coverage_multiplier(
+    query_categories: dict[str, set[str]], matched_categories: dict[str, list[str]]
+) -> float:
+    multiplier = 1.0
+    for category, penalty in [
+        ("domain", 0.55),
+        ("tool_runtime", 0.45),
+        ("evidence_trace", 0.7),
+    ]:
+        if category in query_categories and category not in matched_categories:
+            multiplier *= penalty
+    return multiplier
 
 
 def _matched_values(

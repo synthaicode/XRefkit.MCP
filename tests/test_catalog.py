@@ -702,6 +702,117 @@ Duplicate external body.
             entry["execution_readiness"]["declared_preconditions"],
         )
 
+    def test_rank_skills_uses_categories_for_japanese_test_planning(self) -> None:
+        write(
+            self.repo / "skills" / "test_flow" / "meta.md",
+            """<!-- xid: TESTFLOWMETA -->
+# Skill Meta: test_flow
+
+- skill_id: `test_flow`
+- summary: execute test-planning, test-item structuring, integration/regression test design, and manufacturing-side test-method review
+- use_when: user needs a reviewed test package from planning outputs, requirements, and design evidence
+- input: approved requirements, work plan, test policy, test tool policy
+- output: test plan with selected test tool basis, test execution preparation plan, local-domain test execution helper script plan, test design
+- maturity: `draft`
+- capability: test planning
+- tuning: test execution preparation and helper scripts
+- responsibility: prepare test plans with test data, tools, scripts, and traceability
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "test_flow" / "SKILL.md",
+            "<!-- xid: TESTFLOWDOC -->\n# Skill: test_flow\n",
+        )
+        write(
+            self.repo / "skills" / "implementation_flow" / "meta.md",
+            """<!-- xid: IMPLMETA -->
+# Skill Meta: implementation_flow
+
+- skill_id: `implementation_flow`
+- summary: implement code and scripts after design approval
+- use_when: user needs implementation
+- input: approved design
+- output: source changes
+- maturity: `trial`
+- capability: implementation
+- tuning: code and script implementation
+- responsibility: implement approved changes
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "implementation_flow" / "SKILL.md",
+            "<!-- xid: IMPLDOC -->\n# Skill: implementation_flow\n",
+        )
+        write(
+            self.repo / "skills" / "db_design" / "meta.md",
+            """<!-- xid: DBDESIGNMETA -->
+# Skill Meta: db_design
+
+- skill_id: `db_design`
+- summary: design database schema, stored procedures, and SQL helper scripts
+- use_when: user needs database design or SQL implementation planning
+- input: database requirements, table rules, stored procedure rules
+- output: database design, SQL script preparation, database helper tooling
+- maturity: `draft`
+- capability: database design
+- tuning: SQL scripts and database tool preparation
+- responsibility: prepare database implementation rules
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "db_design" / "SKILL.md",
+            "<!-- xid: DBDESIGNDOC -->\n# Skill: db_design\n",
+        )
+        write(
+            self.repo / "skills" / "test_tool_catalog_preparation" / "meta.md",
+            """<!-- xid: TESTTOOLCATALOGMETA -->
+# Skill Meta: test_tool_catalog_preparation
+
+- skill_id: `test_tool_catalog_preparation`
+- summary: prepare a domain/environment test-tool catalog as reusable domain knowledge for test planning and test design
+- use_when: user needs to catalog test tools before test planning
+- input: target domain, test environment, existing test tool information
+- output: test tool catalog domain knowledge
+- maturity: `draft`
+- capability: test tool cataloging
+- tuning: domain test-tool catalog preparation
+- responsibility: catalog test tools for test planning
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "test_tool_catalog_preparation" / "SKILL.md",
+            "<!-- xid: TESTTOOLCATALOGDOC -->\n# Skill: test_tool_catalog_preparation\n",
+        )
+
+        catalog = XRefCatalog.build(self.repo)
+        ranked = catalog.rank_skills_for_purpose(
+            "テスト用スクリプトを用意し、テストの実行を簡易にする",
+            limit=5,
+        )
+        by_skill_id = {entry["skill_id"]: entry for entry in ranked}
+
+        self.assertEqual(ranked[0]["skill_id"], "test_flow")
+        self.assertIn("summary", ranked[0])
+        self.assertIn("matched_categories", ranked[0])
+        self.assertIn("activity", ranked[0]["matched_categories"])
+        self.assertIn("artifact", ranked[0]["matched_categories"])
+        self.assertIn("domain", ranked[0]["matched_categories"])
+        self.assertIn("tool_runtime", ranked[0]["matched_categories"])
+        self.assertGreater(by_skill_id["test_flow"]["score"], by_skill_id["db_design"]["score"])
+
+        catalog_ranked = catalog.rank_skills_for_purpose(
+            "試験ツールをカタログ化して試験計画で使う",
+            limit=5,
+        )
+        self.assertEqual(
+            catalog_ranked[0]["skill_id"],
+            "test_tool_catalog_preparation",
+        )
+
     def test_rejects_server_tool_with_side_effects(self) -> None:
         contract = ToolContract(
             tool_id="bad.write",
