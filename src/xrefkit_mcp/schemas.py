@@ -78,7 +78,6 @@ class SkillCatalogEntry:
     title: str
     summary: str
     maturity: str
-    capabilities: list[str]
     intent: list[str]
     target_artifacts: list[str]
     applies_when: list[str]
@@ -158,30 +157,6 @@ class XRefDocument:
     content: str
     links: list[dict[str, str]]
     content_hash: str
-
-    def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data.pop("path", None)
-        return data
-
-
-@dataclass(frozen=True)
-class WorkflowCatalogEntry:
-    flow_id: str
-    name: str
-    doc_xid: str | None
-    phase: str | None
-    owner: str | None
-    path: str
-    schema_style: Literal["deterministic_steps", "legacy_sequence", "unknown"]
-    entry: str | None
-    steps: list[str]
-    sequence: list[str]
-    capabilities: list[str]
-    runs_after: list[str]
-    runs_before: list[str]
-    missing: list[str] = field(default_factory=list)
-    zone_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

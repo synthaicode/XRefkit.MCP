@@ -39,7 +39,6 @@ from .schemas import (
     StartupContext,
     StartupReference,
     ToolContract,
-    WorkflowCatalogEntry,
     XRefDocument,
 )
 from .startup_contract_pack import (
@@ -409,9 +408,6 @@ class XRefCatalog:
     def list_tool_contracts(self) -> list[dict]:
         return [contract.to_dict() for contract in self.tools]
 
-    def list_workflows(self) -> list[dict]:
-        return [workflow.to_dict() for workflow in _build_workflows(self.repo_root, self.ownership)]
-
     def get_client_tool_manifest(self) -> dict:
         return _client_tool_distribution(self.repo_root).to_dict()
 
@@ -640,7 +636,6 @@ class XRefCatalog:
                     "startup": "get_startup_context",
                     "xid_link_resolution": "get_document_by_xid",
                     "skill_content": "get_skill",
-                    "workflow_catalog": "list_workflows",
                 },
             },
             context_injection_policy=_context_injection_policy(),
@@ -790,7 +785,7 @@ def _knowledge_entry(
 
 def _managed_markdown_files(root: Path, ownership: Ownership | None = None) -> list[Path]:
     files: list[Path] = []
-    for dirname in ["agent", "docs", "knowledge", "capabilities", "skills"]:
+    for dirname in ["agent", "docs", "knowledge", "skills"]:
         base = root / dirname
         if base.exists():
             files.extend(path for path in sorted(base.glob("**/*.md")) if _catalog_enabled(root, ownership, path))
@@ -1038,7 +1033,6 @@ def _build_skill_entry(root: Path, ownership: Ownership | None, meta_path: Path)
     skill_text = read_text(skill_doc) if skill_doc.exists() else ""
     missing = _missing_skill_fields(meta, skill_doc.exists())
     knowledge_refs = scalar_list(meta, "knowledge_refs")
-    capability_refs = scalar_list(meta, "capability_refs")
     closure = ClosureContract(
         closure_conditions=scalar_list(meta, "closure")
         or _section_bullets(skill_text, "Closure"),
@@ -1054,7 +1048,6 @@ def _build_skill_entry(root: Path, ownership: Ownership | None, meta_path: Path)
         title=first_heading(skill_text or text, skill_id),
         summary=str(meta.get("summary") or first_paragraph(skill_text)),
         maturity=str(meta.get("maturity") or "unknown"),
-        capabilities=[_xref_to_id(item) for item in capability_refs],
         intent=_derive_intent(meta),
         target_artifacts=_derive_target_artifacts(meta),
         applies_when=scalar_list(meta, "applies_when")
@@ -1155,49 +1148,6 @@ def _build_skills(root: Path, ownership: Ownership | None = None) -> list[SkillC
     entries: list[SkillCatalogEntry] = []
     for meta_path in _content_files(root, ownership, "skills", "meta.md"):
         entries.append(_build_skill_entry(root, ownership, meta_path))
-    return entries
-
-
-def _build_workflows(root: Path, ownership: Ownership | None = None) -> list[WorkflowCatalogEntry]:
-    entries: list[WorkflowCatalogEntry] = []
-    for path in _content_files(root, ownership, "flows", "*.yaml"):
-        text = read_text(path)
-        scalar = _yaml_top_scalars(text)
-        owner = _yaml_nested_scalar(text, "owner", "primary")
-        entry = scalar.get("entry")
-        steps = _yaml_map_keys(text, "steps")
-        sequence = _yaml_top_list(text, "sequence")
-        capabilities = _yaml_values_for_key(text, "capability")
-        schema_style = "unknown"
-        if steps:
-            schema_style = "deterministic_steps"
-        elif sequence:
-            schema_style = "legacy_sequence"
-        missing: list[str] = []
-        for field in ["flow_id", "name", "doc_xid"]:
-            if not scalar.get(field):
-                missing.append(field)
-        if schema_style == "deterministic_steps" and not entry:
-            missing.append("entry")
-        entries.append(
-            WorkflowCatalogEntry(
-                flow_id=scalar.get("flow_id") or path.stem,
-                name=scalar.get("name") or path.stem,
-                doc_xid=scalar.get("doc_xid"),
-                phase=scalar.get("phase"),
-                owner=owner,
-                path=relative_to_repo(path, root),
-                schema_style=schema_style,  # type: ignore[arg-type]
-                entry=entry,
-                steps=steps,
-                sequence=sequence,
-                capabilities=capabilities,
-                runs_after=_yaml_top_list(text, "runs_after"),
-                runs_before=_yaml_top_list(text, "runs_before"),
-                missing=missing,
-                zone_metadata=_zone_metadata(ownership, relative_to_repo(path, root)),
-            )
-        )
     return entries
 
 
@@ -1438,7 +1388,7 @@ def _client_obligations() -> list[ClientObligation]:
             enforcement_owner="server",
             verification=(
                 "get_document_by_xid, get_skill, get_skill_requirements, "
-                "list_workflows, expand_knowledge, get_knowledge_summary, "
+                "expand_knowledge, get_knowledge_summary, "
                 "build_knowledge_context, and list_skills with "
                 "include_content=true reject the call for any MCP session "
                 "that has not first called get_startup_context"
@@ -1542,14 +1492,6 @@ def _semantic_routing_references() -> list[dict[str, object]]:
             "rank_tool": "rank_skills_for_purpose",
             "materialize_tool": "get_skill",
             "materialize_argument": "skill_id",
-            "body_mode": "lazy",
-        },
-        {
-            "id": "workflows",
-            "purpose": "semantic workflow routing and workflow-order lookup",
-            "summary_tool": "list_workflows",
-            "materialize_tool": "get_document_by_xid",
-            "materialize_argument": "doc_xid",
             "body_mode": "lazy",
         },
         {
@@ -2005,7 +1947,7 @@ def _runtime_role_contract() -> RuntimeRoleContract:
             "python -m fm skill verify --log <run-log>",
             "python -m fm skill close --log <run-log>",
         ],
-        source_xids=["B7A2C94F0E61", "6D2E4A9C0B71", "4C7E9A2B1D63", "1F93A7C24010"],
+        source_xids=["B7A2C94F0E61", "4C7E9A2B1D63"],
     )
 
 
@@ -2015,7 +1957,6 @@ def _missing_skill_fields(meta: dict[str, object], has_skill_doc: bool) -> list[
         "summary",
         "maturity",
         "knowledge_refs",
-        "capability_refs",
         "input",
         "output",
     ]
@@ -2092,11 +2033,6 @@ def _required_tool(name: str) -> dict[str, object]:
         "execution_location": "client",
         "required_when": "declared by Skill meta required_tools",
     }
-
-
-def _xref_to_id(ref: str) -> str:
-    xid_match = re.search(r"#xid-([A-Za-z0-9]+)", ref)
-    return xid_match.group(1) if xid_match else ref
 
 
 def _section_bullets(text: str, heading: str) -> list[str]:

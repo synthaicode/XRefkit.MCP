@@ -237,24 +237,10 @@ Pack-local rule.
             self.repo / "packs" / "business-intake" / "skills" / "pack_sample" / "SKILL.md",
             "# Pack Sample\n",
         )
-        write(
-            self.repo / "packs" / "business-intake" / "flows" / "pack_flow.yaml",
-            """flow_id: FLOW-PACK
-name: pack_flow
-doc_xid: PACKFLOWDOC
-entry: start
-steps:
-  start:
-    on:
-      Go: COMPLETE
-""",
-        )
-
         without_ownership = XRefCatalog.build(self.repo)
 
         self.assertNotIn("PACKRULE123", [entry.xid for entry in without_ownership.knowledge])
         self.assertNotIn("pack_sample", [entry.skill_id for entry in without_ownership.skills])
-        self.assertNotIn("FLOW-PACK", [entry["flow_id"] for entry in without_ownership.list_workflows()])
 
         write(
             self.repo / "ownership.yaml",
@@ -273,11 +259,9 @@ steps:
         with_ownership = XRefCatalog.build(self.repo)
         pack_knowledge = next(entry for entry in with_ownership.knowledge if entry.xid == "PACKRULE123")
         pack_skill = next(entry for entry in with_ownership.skills if entry.skill_id == "pack_sample")
-        pack_flow = next(entry for entry in with_ownership.list_workflows() if entry["flow_id"] == "FLOW-PACK")
 
         self.assertEqual("shared-packs", pack_knowledge.zone_metadata["zone"])
         self.assertEqual("business-intake", pack_skill.zone_metadata["pack_id"])
-        self.assertEqual("shared-packs", pack_flow["zone_metadata"]["zone"])
         self.assertTrue(with_ownership.get_startup_context()["repository_zones"]["ownership_enabled"])
 
     def test_get_document_by_xid_fails_closed_on_duplicate_xid(self) -> None:
@@ -799,11 +783,7 @@ Duplicate body.
         )
         self.assertEqual(routing_refs["skills"]["rank_tool"], "rank_skills_for_purpose")
         self.assertEqual(routing_refs["skills"]["materialize_tool"], "get_skill")
-        self.assertEqual(routing_refs["workflows"]["summary_tool"], "list_workflows")
-        self.assertEqual(
-            routing_refs["workflows"]["materialize_tool"],
-            "get_document_by_xid",
-        )
+        self.assertNotIn("workflows", routing_refs)
         self.assertNotIn("client_tools", routing_refs)
         obligation_ids = {item["id"] for item in context["client_obligations"]}
         self.assertIn("startup.first_call", obligation_ids)
@@ -869,15 +849,6 @@ Duplicate body.
         self.assertNotIn("path", uncertainty)
         self.assertEqual(uncertainty["xid"], "8A666C1FD121")
         self.assertEqual(context["missing"], [])
-
-    def test_lists_workflows(self) -> None:
-        catalog = XRefCatalog.build(self.repo)
-
-        workflows = catalog.list_workflows()
-
-        self.assertEqual(workflows[0]["schema_style"], "deterministic_steps")
-        self.assertEqual(workflows[0]["entry"], "draft")
-        self.assertEqual(workflows[0]["capabilities"], ["CAP-SAMPLE-001"])
 
     def test_resolves_any_managed_document_by_xid(self) -> None:
         catalog = XRefCatalog.build(self.repo)

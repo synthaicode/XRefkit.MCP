@@ -256,11 +256,6 @@ def main(argv: list[str] | None = None) -> int:
         return _with_control_reminder(result)
 
     @app.tool()
-    def list_workflows(ctx: Context) -> list[dict[str, Any]]:
-        _require_startup_loaded(ctx, "list_workflows")
-        return catalog.list_workflows()
-
-    @app.tool()
     def get_skill_requirements(ctx: Context, skill_id: str) -> dict[str, Any]:
         _require_startup_loaded(ctx, "get_skill_requirements")
         result = catalog.get_skill_requirements(skill_id)

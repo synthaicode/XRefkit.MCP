@@ -67,9 +67,6 @@ def main(argv: list[str] | None = None) -> int:
     skill.add_argument("--repo", required=True)
     skill.add_argument("--skill-id", required=True)
 
-    workflows = sub.add_parser("list-workflows", help="list workflow catalog")
-    workflows.add_argument("--repo", required=True)
-
     rank = sub.add_parser("rank-skills", help="rank Skill candidates for a purpose")
     rank.add_argument("--repo", required=True)
     rank.add_argument("--purpose", required=True)
@@ -141,8 +138,6 @@ def main(argv: list[str] | None = None) -> int:
         payload = model.list_skills(args.limit, args.include_content)
     elif args.command == "get-skill":
         payload = model.get_skill(args.skill_id)
-    elif args.command == "list-workflows":
-        payload = model.list_workflows()
     elif args.command == "rank-skills":
         payload = model.rank_skills_for_purpose(args.purpose, args.limit)
     elif args.command == "tool-contracts":
