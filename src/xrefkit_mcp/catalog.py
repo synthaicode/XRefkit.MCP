@@ -9,18 +9,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .contracts import builtin_tool_contracts
+from .ownership import Ownership, load_ownership, validate_ownership
 from .repository import (
     first_heading,
     first_paragraph,
     first_xid,
-    git_last_modified,
+    file_last_modified,
     markdown_xid_link_targets,
     markdown_xid_only_text,
     markdown_xid_links,
     parse_meta_bullets,
     read_text,
     relative_to_repo,
-    repository_fingerprint,
+    repository_identity,
     scalar_list,
     stable_hash,
 )
@@ -38,12 +39,15 @@ from .schemas import (
     StartupContext,
     StartupReference,
     ToolContract,
-    WorkflowCatalogEntry,
     XRefDocument,
 )
 from .startup_contract_pack import (
+    EMBEDDED_BASED_ON_HASHES,
+    STARTUP_CONTRACT_PACK_XID,
+    normalize_pack_body,
     normalized_startup_contract_pack_body,
-    startup_contract_pack_hash,
+    parse_based_on_hashes,
+    parse_pack_version,
 )
 
 
@@ -106,39 +110,73 @@ STOP_TOKENS = {
 class XRefCatalog:
     repo_root: Path
     repository_fingerprint: str
-    catalog_version: str
-    knowledge: list[KnowledgeCatalogEntry]
-    skills: list[SkillCatalogEntry]
+    fingerprint_basis: str
     tools: list[ToolContract]
+    ownership: Ownership | None = None
 
     @classmethod
     def build(cls, repo_root: str | Path) -> "XRefCatalog":
         root = Path(repo_root).resolve()
         if not root.exists():
             raise FileNotFoundError(root)
-        knowledge = _build_knowledge(root)
-        skills = _build_skills(root)
-        tools = builtin_tool_contracts()
-        version_basis = "\n".join(
-            [entry.content_hash for entry in knowledge]
-            + [entry.skill_id + entry.summary for entry in skills]
-            + [tool.tool_id + tool.version for tool in tools]
-        )
-        catalog_version = stable_hash(version_basis)[:16]
+        fingerprint, fingerprint_basis = repository_identity(root)
+        ownership = load_ownership(root)
+        if ownership is not None:
+            errors = validate_ownership(root, ownership)
+            if errors:
+                raise ValueError("invalid ownership.yaml: " + "; ".join(errors))
         return cls(
             repo_root=root,
-            repository_fingerprint=repository_fingerprint(root),
-            catalog_version=catalog_version,
-            knowledge=knowledge,
-            skills=skills,
-            tools=tools,
+            repository_fingerprint=fingerprint,
+            fingerprint_basis=fingerprint_basis,
+            tools=builtin_tool_contracts(),
+            ownership=ownership,
         )
+
+    # knowledge, skills, and catalog_version are rebuilt from the live
+    # repository on every access so every content-bearing response shares one
+    # freshness model with get_document_by_xid (live reads). A frozen
+    # build-time snapshot previously let expand_knowledge return a stale
+    # content_hash next to a live body on a long-running server, silently
+    # breaking the client cache protocol, and hid knowledge/Skill files added
+    # or removed after startup.
+    @property
+    def knowledge(self) -> list[KnowledgeCatalogEntry]:
+        return [entry for entry, _text in self._scan_knowledge()]
+
+    @property
+    def skills(self) -> list[SkillCatalogEntry]:
+        return _build_skills(self.repo_root, self.ownership)
+
+    @property
+    def catalog_version(self) -> str:
+        version_basis = "\n".join(
+            [entry.content_hash for entry in self.knowledge]
+            + [entry.skill_id + entry.summary for entry in self.skills]
+            + [tool.tool_id + tool.version for tool in self.tools]
+            + ([self.ownership.content_hash] if self.ownership else [])
+        )
+        return stable_hash(version_basis)[:16]
+
+    def _scan_knowledge(self) -> list[tuple[KnowledgeCatalogEntry, str]]:
+        """One consistent read per file: entry hash and body come from the
+        same text, so they can never disagree."""
+        entries: list[tuple[KnowledgeCatalogEntry, str]] = []
+        for path in _content_files(self.repo_root, self.ownership, "knowledge", "*.md"):
+            text = read_text(path)
+            entries.append((_knowledge_entry(self.repo_root, self.ownership, path, text), text))
+        return entries
 
     def get_repository_identity(self) -> dict[str, str]:
         return {
             "repository_fingerprint": self.repository_fingerprint,
             "fingerprint_algorithm": "sha256",
-            "fingerprint_basis": "resolved_repository_root",
+            "fingerprint_basis": self.fingerprint_basis,
+            "fingerprint_scope": (
+                "shared_across_clones"
+                if self.fingerprint_basis == "git_root_commits"
+                else "local_path_only"
+            ),
             "cache_namespace": self.repository_fingerprint,
         }
 
@@ -149,13 +187,13 @@ class XRefCatalog:
         return [entry.to_dict() for entry in _rank_entries(query, self.knowledge)[:limit]]
 
     def expand_knowledge(self, xid: str) -> dict:
-        entry = self._knowledge_by_xid(xid)
-        content = read_text(self.repo_root / entry.path)
+        entry, content = self._knowledge_by_xid(xid)
         return {"entry": entry.to_dict(), "content": content}
 
     def build_knowledge_context(self, query: str, limit: int = 5) -> dict:
-        ranked = _rank_entries(query, self.knowledge)[:limit]
-        by_xid = {entry.xid: entry for entry in self.knowledge}
+        scanned = self._scan_knowledge()
+        ranked = _rank_entries(query, [entry for entry, _text in scanned])[:limit]
+        by_xid = {entry.xid: (entry, text) for entry, text in scanned}
         expanded: list[dict] = []
         missing: list[dict] = []
         seen: set[str] = set()
@@ -173,21 +211,32 @@ class XRefCatalog:
                         }
                     )
                     continue
-                expanded.append(self.expand_knowledge(candidate.xid))
+                candidate_entry, candidate_text = candidate
+                expanded.append(
+                    {"entry": candidate_entry.to_dict(), "content": candidate_text}
+                )
         return {"entries": expanded, "missing": missing}
 
     def list_skills(
         self,
         limit: int | None = None,
-        include_content: bool = True,
+        include_content: bool = False,
     ) -> list[dict]:
-        fresh_entries = [
-            _fresh_skill_entry(entry, self.repo_root)
-            for entry in self.skills[: limit or None]
-        ]
-        results = [entry.to_dict() for entry in fresh_entries]
+        # Metadata-only by default: full procedure bodies are lazy-loaded
+        # governance content (get_skill), not routing metadata. The old
+        # include_content=True default let one ungated call return every
+        # SKILL.md body, bypassing both the startup ordering and the
+        # body_mode=lazy context policy.
+        entries = self.skills[: limit or None]
+        results = [entry.to_dict() for entry in entries]
+        duplicate_ids = _duplicate_skill_ids(self.skills)
+        for result in results:
+            if result["skill_id"] in duplicate_ids:
+                result.setdefault("zone_metadata", {})["identity_conflict"] = True
+                result["zone_metadata"]["conflict_key"] = result["skill_id"]
+                result["zone_metadata"]["conflict_paths"] = duplicate_ids[result["skill_id"]]
         if not include_content:
-            for entry, result in zip(fresh_entries, results, strict=True):
+            for entry, result in zip(entries, results, strict=True):
                 result["meta_content"] = None
                 result["skill_content"] = None
                 result["document_versions"] = _skill_document_versions(
@@ -203,7 +252,6 @@ class XRefCatalog:
         known_document_versions: dict[str, str] | None = None,
     ) -> dict:
         entry = self._skill_by_id(skill_id)
-        entry = _fresh_skill_entry(entry, self.repo_root)
         result = entry.to_dict()
         result["client_tool_download"] = _client_tool_download_policy(entry)
         if known_document_versions is None:
@@ -243,6 +291,60 @@ class XRefCatalog:
             "missing": entry.missing,
         }
 
+    def resolve_skill_knowledge(self, skill_id: str) -> dict:
+        """Resolve a Skill's declared ``knowledge_slots`` against the base+local
+        unified catalog (design 082 Decision 3 / 084 M5).
+
+        Each slot declares a need — a ``query`` or a pinned ``bind`` XID — plus
+        acceptance metadata (``min``, ``domain``, ``required``). Selection is
+        dynamic (ranked over the merged base+local knowledge roots); the slot
+        definition stays in the Skill meta. Returns ranked candidates and
+        per-slot satisfaction so planning/routing can gate on required slots.
+        Empty ``slots`` for a Skill that has not declared any yet.
+        """
+        entry = self._skill_by_id(skill_id)
+        knowledge = self.knowledge
+        by_xid = {item.xid: item for item in knowledge}
+        resolved: list[dict] = []
+        for slot in entry.knowledge_slots:
+            name = slot.get("slot") or slot.get("name")
+            bind = slot.get("bind")
+            domain = slot.get("domain")
+            min_count = _slot_int(slot.get("min"), 0)
+            required = _slot_bool(slot.get("required"))
+            if bind:
+                match = by_xid.get(str(bind))
+                query = None
+                candidates = [match.to_dict()] if match else []
+            else:
+                query = str(slot.get("query") or name or "")
+                ranked = _rank_entries(query, knowledge)
+                if domain:
+                    ranked = [item for item in ranked if item.domain == domain]
+                candidates = [item.to_dict() for item in ranked[: _slot_int(slot.get("limit"), 5)]]
+            satisfied = len(candidates) >= max(min_count, 1) if required else True
+            resolved.append(
+                {
+                    "slot": name,
+                    "query": query,
+                    "bind": str(bind) if bind else None,
+                    "domain": domain,
+                    "min": min_count,
+                    "required": required,
+                    "candidates": candidates,
+                    "satisfied": satisfied,
+                }
+            )
+        return {
+            "skill_id": entry.skill_id,
+            "slots": resolved,
+            "unsatisfied_required": [
+                slot["slot"]
+                for slot in resolved
+                if slot["required"] and not slot["satisfied"]
+            ],
+        }
+
     def rank_skills_for_purpose(self, purpose: str, limit: int = 5) -> list[dict]:
         query_tokens = _tokens(purpose)
         results: list[SkillRankResult] = []
@@ -257,6 +359,11 @@ class XRefCatalog:
                 ("applies_when", skill.applies_when, 0.2),
                 ("summary", [skill.summary], 0.2),
                 ("inputs", skill.inputs, 0.1),
+                # Skill-centric consolidation (084 M4): the triad is the routing
+                # vocabulary. Empty for un-migrated skills, so this is additive.
+                ("capability", [skill.capability], 0.2),
+                ("tuning", [skill.tuning], 0.2),
+                ("responsibility", [skill.responsibility], 0.2),
             ]:
                 matched = _matched_values(query_tokens, values)
                 if matched:
@@ -276,7 +383,15 @@ class XRefCatalog:
                 for item in skill.required_tools
                 if item.get("tool_id") and item.get("tool_id") not in available_tools
             ]
-            readiness = {"runnable": not missing_tools, "missing_tool_contracts": missing_tools}
+            # Declared preconditions travel with the ranking so the client can
+            # filter to Skills runnable in the current state (084 M4). Empty
+            # until metas adopt preconditions; tool-availability stays the only
+            # server-known readiness signal.
+            readiness = {
+                "runnable": not missing_tools,
+                "missing_tool_contracts": missing_tools,
+                "declared_preconditions": skill.preconditions,
+            }
             results.append(
                 SkillRankResult(
                     skill_id=skill.skill_id,
@@ -292,9 +407,6 @@ class XRefCatalog:
 
     def list_tool_contracts(self) -> list[dict]:
         return [contract.to_dict() for contract in self.tools]
-
-    def list_workflows(self) -> list[dict]:
-        return [workflow.to_dict() for workflow in _build_workflows(self.repo_root)]
 
     def get_client_tool_manifest(self) -> dict:
         return _client_tool_distribution(self.repo_root).to_dict()
@@ -408,14 +520,29 @@ class XRefCatalog:
         xid: str,
         known_version: str | None = None,
     ) -> dict:
-        for path in _managed_markdown_files(self.repo_root):
-            text = read_text(path)
-            if first_xid(text) == xid:
-                return _conditional_document_response(
-                    _xref_document(path, self.repo_root, text),
-                    known_version,
-                    self.repository_fingerprint,
-                )
+        matches = _managed_markdown_matches_by_xid(self.repo_root, self.ownership, xid)
+        if len(matches) > 1:
+            return {
+                "ok": False,
+                "error": "xid_conflict",
+                "xid": xid,
+                "message": "multiple catalog-visible documents declare this XID; refusing path-order selection",
+                "matches": [
+                    {
+                        "path": relative_to_repo(path, self.repo_root),
+                        "content_hash": _xref_document(path, self.repo_root, text).content_hash,
+                        "zone_metadata": _zone_metadata(self.ownership, relative_to_repo(path, self.repo_root)),
+                    }
+                    for path, text in matches
+                ],
+            }
+        if len(matches) == 1:
+            path, text = matches[0]
+            return _conditional_document_response(
+                _xref_document(path, self.repo_root, text),
+                known_version,
+                self.repository_fingerprint,
+            )
         raise KeyError(f"document xid not found: {xid}")
 
     def get_startup_context(
@@ -425,7 +552,7 @@ class XRefCatalog:
         known_document_versions = known_document_versions or {}
         references: list[StartupReference] = []
         missing: list[dict[str, str]] = []
-        managed_documents = _managed_markdown_by_xid(self.repo_root)
+        managed_documents = _managed_markdown_by_xid(self.repo_root, self.ownership)
         for expected_xid, layer in STARTUP_REFERENCE_DEFINITIONS:
             resolved = managed_documents.get(expected_xid)
             if resolved is None:
@@ -465,6 +592,23 @@ class XRefCatalog:
                     repository_fingerprint=self.repository_fingerprint,
                 )
             )
+        pack_resolved = managed_documents.get(STARTUP_CONTRACT_PACK_XID)
+        pack_document_text = pack_resolved[1] if pack_resolved else None
+        startup_contract_pack = _startup_contract_pack(references, pack_document_text)
+        client_instructions = _client_instructions()
+        if startup_contract_pack["stale"]:
+            stale_xids = [
+                str(item["xid"]) for item in startup_contract_pack["stale_sources"]
+            ]
+            client_instructions = [
+                *client_instructions,
+                "startup_contract_pack is STALE: the source documents "
+                f"{', '.join(stale_xids)} changed after the pack was authored "
+                "(based_on_hashes no longer match source_hashes). Treat the "
+                "pack wording as potentially outdated for those areas, resolve "
+                "the live sources with get_document_by_xid, and escalate to "
+                "the repository maintainers to regenerate the pack.",
+            ]
         return StartupContext(
             catalog_version=self.catalog_version,
             repository_identity=self.get_repository_identity(),
@@ -492,28 +636,13 @@ class XRefCatalog:
                     "startup": "get_startup_context",
                     "xid_link_resolution": "get_document_by_xid",
                     "skill_content": "get_skill",
-                    "workflow_catalog": "list_workflows",
                 },
             },
             context_injection_policy=_context_injection_policy(),
             session_context_deduplication=_session_context_deduplication(),
             core_runtime_distribution=_fm_runtime_distribution(self.repo_root).to_dict(),
-            client_instructions=[
-                "A client may call get_repository_identity as a content-free cache namespace preflight; get_startup_context remains the first governance-content load.",
-                "Fetch core_runtime_distribution (get_fm_runtime_bundle or get_fm_runtime_pip_package) immediately after this call, unconditionally. Unlike client_tool_download, this is not gated behind Skill selection: Skill execution requires python -m fm skill run right after a Skill is chosen.",
-                "Materialize and apply startup references in load_order before routing task-specific work. Applying a reference means enforcing its operational contract in the client runtime; it does not require injecting the full document body into the model prompt unless context_injection_policy requires it.",
-                "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
-                "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
-                "Do not assume referenced Markdown files exist on the client filesystem.",
-                "Do not automatically load all links from startup references; use links only when the current task actually needs them.",
-                "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
-                "Use the returned document content as the authoritative text for that XID.",
-                "At startup, record the XIDs used for client-side routing, policy, or context-injection decisions in a client-side audit log.",
-                "For Skill entries, use skill_content as the procedure body and resolve skill_links through get_document_by_xid when needed.",
-                "Keep client-side XID document cache entries only when cache_policy.cache_recommended is true.",
-                "Fetch client-side tool manifests or packages only after a selected Skill declares client-side required_tools.",
-                "Send cached content_hash values as known_version or known_document_versions; when cache_status is not_modified, use the locally hash-validated body instead of downloading it again.",
-            ],
+            repository_zones=_repository_zones(self.ownership),
+            client_instructions=client_instructions,
             client_obligations=_client_obligations(),
             link_resolution={
                 "link_field": "links",
@@ -525,75 +654,179 @@ class XRefCatalog:
                 "example_call": "get_document_by_xid({\"xid\": \"8A666C1FD121\"})",
             },
             load_order=[reference.xid for reference in references],
-            startup_contract_pack=_startup_contract_pack(references),
+            startup_contract_pack=startup_contract_pack,
             references=references,
             semantic_routing_references=_semantic_routing_references(),
             missing=missing,
         ).to_dict()
 
-    def _knowledge_by_xid(self, xid: str) -> KnowledgeCatalogEntry:
-        for entry in self.knowledge:
+    def _knowledge_by_xid(self, xid: str) -> tuple[KnowledgeCatalogEntry, str]:
+        for entry, text in self._scan_knowledge():
             if entry.xid == xid:
-                return entry
+                return entry, text
         raise KeyError(f"knowledge xid not found: {xid}")
 
     def _skill_by_id(self, skill_id: str) -> SkillCatalogEntry:
-        for entry in self.skills:
-            if entry.skill_id == skill_id:
-                return entry
+        matches = [entry for entry in self.skills if entry.skill_id == skill_id]
+        if len(matches) > 1:
+            paths = [entry.meta_path for entry in matches]
+            raise ValueError(
+                "skill identity conflict: "
+                f"{skill_id} appears in multiple catalog-visible entries: {paths}"
+            )
+        if len(matches) == 1:
+            return matches[0]
         raise KeyError(f"skill not found: {skill_id}")
 
 
-def _build_knowledge(root: Path) -> list[KnowledgeCatalogEntry]:
-    entries: list[KnowledgeCatalogEntry] = []
-    for path in sorted((root / "knowledge").glob("**/*.md")):
-        text = read_text(path)
-        xid = first_xid(text)
-        missing: list[str] = []
-        if not xid:
-            xid = f"path:{relative_to_repo(path, root)}"
-            missing.append("xid")
-        rel = relative_to_repo(path, root)
-        parts = Path(rel).parts
-        domain = parts[1] if len(parts) > 2 else "knowledge"
-        links = markdown_xid_links(text)
-        entries.append(
-            KnowledgeCatalogEntry(
-                xid=xid,
-                version=1,
-                content_hash=stable_hash(text),
-                revised_at=git_last_modified(root, path),
-                title=first_heading(text, path.stem),
-                domain=domain,
-                summary=first_paragraph(text),
-                applies_when=[],
-                requires_knowledge=links,
-                related_skills=[],
-                related_capabilities=[],
-                path=rel,
-                missing=missing,
-            )
+def _client_instructions() -> list[str]:
+    return [
+        "A client may call get_repository_identity as a content-free cache namespace preflight; get_startup_context remains the first governance-content load.",
+        "Fetch core_runtime_distribution (get_fm_runtime_bundle or get_fm_runtime_pip_package) immediately after this call, unconditionally. Unlike client_tool_download, this is not gated behind Skill selection: Skill execution requires python -m fm skill run right after a Skill is chosen.",
+        "Materialize and apply startup references in load_order before routing task-specific work. Applying a reference means enforcing its operational contract in the client runtime; it does not require injecting the full document body into the model prompt unless context_injection_policy requires it.",
+        "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
+        "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
+        "Do not assume referenced Markdown files exist on the client filesystem.",
+        "Do not automatically load all links from startup references; use links only when the current task actually needs them.",
+        "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
+        "Use the returned document content as the authoritative text for that XID.",
+        "At startup, record the XIDs used for client-side routing, policy, or context-injection decisions in a client-side audit log.",
+        "For Skill entries, use skill_content as the procedure body and resolve skill_links through get_document_by_xid when needed.",
+        "Keep client-side XID document cache entries only when cache_policy.cache_recommended is true.",
+        "Fetch client-side tool manifests or packages only after a selected Skill declares client-side required_tools.",
+        "Send cached content_hash values as known_version or known_document_versions; when cache_status is not_modified, use the locally hash-validated body instead of downloading it again.",
+    ]
+
+
+def _content_files(
+    root: Path,
+    ownership: Ownership | None,
+    family: str,
+    pattern: str,
+) -> list[Path]:
+    paths: list[Path] = []
+    base = root / family
+    if base.exists():
+        paths.extend(
+            path
+            for path in sorted(base.glob(f"**/{pattern}"))
+            if _catalog_enabled(root, ownership, path)
         )
-    return entries
+    packs_root = root / "packs"
+    if ownership is not None and packs_root.exists():
+        paths.extend(
+            path
+            for path in sorted(packs_root.glob(f"*/{family}/**/{pattern}"))
+            if _catalog_enabled(root, ownership, path)
+        )
+        paths.extend(
+            path
+            for path in sorted(packs_root.glob(f"local/*/{family}/**/{pattern}"))
+            if _catalog_enabled(root, ownership, path)
+        )
+    return sorted(set(paths))
 
 
-def _managed_markdown_files(root: Path) -> list[Path]:
+def _catalog_enabled(root: Path, ownership: Ownership | None, path: Path) -> bool:
+    if ownership is None:
+        return True
+    return ownership.catalog_enabled(relative_to_repo(path, root))
+
+
+def _zone_metadata(ownership: Ownership | None, rel_path: str) -> dict[str, object]:
+    if ownership is None:
+        return {
+            "ownership_enabled": False,
+            "zone": None,
+            "owner": None,
+            "pack_id": None,
+            "local_only": False,
+            "catalog": True,
+            "distribution": True,
+            "shadowing": False,
+        }
+    metadata = ownership.metadata_for(rel_path)
+    metadata["ownership_enabled"] = True
+    return metadata
+
+
+def _knowledge_entry(
+    root: Path,
+    ownership: Ownership | None,
+    path: Path,
+    text: str,
+) -> KnowledgeCatalogEntry:
+    xid = first_xid(text)
+    missing: list[str] = []
+    if not xid:
+        xid = f"path:{relative_to_repo(path, root)}"
+        missing.append("xid")
+    rel = relative_to_repo(path, root)
+    parts = Path(rel).parts
+    domain = parts[1] if len(parts) > 2 else "knowledge"
+    links = markdown_xid_links(text)
+    return KnowledgeCatalogEntry(
+        xid=xid,
+        version=1,
+        content_hash=stable_hash(text),
+        revised_at=file_last_modified(path),
+        title=first_heading(text, path.stem),
+        domain=domain,
+        summary=first_paragraph(text),
+        applies_when=[],
+        requires_knowledge=links,
+        related_skills=[],
+        related_capabilities=[],
+        path=rel,
+        missing=missing,
+        zone_metadata=_zone_metadata(ownership, rel),
+    )
+
+
+def _managed_markdown_files(root: Path, ownership: Ownership | None = None) -> list[Path]:
     files: list[Path] = []
-    for dirname in ["agent", "docs", "knowledge", "capabilities", "skills"]:
+    for dirname in ["agent", "docs", "knowledge", "skills"]:
         base = root / dirname
         if base.exists():
-            files.extend(sorted(base.glob("**/*.md")))
+            files.extend(path for path in sorted(base.glob("**/*.md")) if _catalog_enabled(root, ownership, path))
+    packs_root = root / "packs"
+    if ownership is not None and packs_root.exists():
+        files.extend(
+            path
+            for path in sorted(packs_root.glob("*/**/*.md"))
+            if _catalog_enabled(root, ownership, path)
+        )
     return files
 
 
-def _managed_markdown_by_xid(root: Path) -> dict[str, tuple[Path, str]]:
+def _managed_markdown_by_xid(root: Path, ownership: Ownership | None = None) -> dict[str, tuple[Path, str]]:
     documents: dict[str, tuple[Path, str]] = {}
-    for path in _managed_markdown_files(root):
+    for path in _managed_markdown_files(root, ownership):
         text = read_text(path)
         xid = first_xid(text)
         if xid:
             documents.setdefault(xid, (path, text))
     return documents
+
+
+def _managed_markdown_matches_by_xid(
+    root: Path,
+    ownership: Ownership | None,
+    xid: str,
+) -> list[tuple[Path, str]]:
+    matches: list[tuple[Path, str]] = []
+    for path in _managed_markdown_files(root, ownership):
+        text = read_text(path)
+        if first_xid(text) == xid:
+            matches.append((path, text))
+    return matches
+
+
+def _duplicate_skill_ids(entries: list[SkillCatalogEntry]) -> dict[str, list[str]]:
+    by_id: dict[str, list[str]] = {}
+    for entry in entries:
+        by_id.setdefault(entry.skill_id, []).append(entry.meta_path)
+    return {skill_id: paths for skill_id, paths in by_id.items() if len(paths) > 1}
 
 
 def _xref_document(path: Path, root: Path, text: str) -> XRefDocument:
@@ -726,7 +959,10 @@ def _skill_document_versions(
     return versions
 
 
-def _startup_contract_pack(references: list[StartupReference]) -> dict[str, object]:
+def _startup_contract_pack(
+    references: list[StartupReference],
+    pack_document_text: str | None,
+) -> dict[str, object]:
     source_xids = [reference.xid for reference in references]
     expected_xids = [xid for xid, _layer in STARTUP_REFERENCE_DEFINITIONS]
     if source_xids != expected_xids:
@@ -741,24 +977,54 @@ def _startup_contract_pack(references: list[StartupReference]) -> dict[str, obje
         if not reference.content_hash:
             raise ValueError(f"startup reference missing content_hash: {reference.xid}")
         source_hashes[reference.xid] = reference.content_hash
+
+    # The pack is a hand-compressed derivation of the source documents, so
+    # it can drift when a source changes. Authoritative body: the pack
+    # document in the served repository (authored and reviewed next to its
+    # sources); fallback: the body embedded in this package. Either way the
+    # based_on hashes recorded at authoring time are compared against the
+    # live source hashes and any mismatch is reported as staleness instead
+    # of being silently served.
+    if pack_document_text is not None:
+        body = normalize_pack_body(markdown_xid_only_text(pack_document_text))
+        based_on_hashes = parse_based_on_hashes(pack_document_text)
+        pack_version = parse_pack_version(pack_document_text) or 1
+        pack_source = "repository_document"
+        pack_doc_xid: str | None = STARTUP_CONTRACT_PACK_XID
+    else:
+        body = normalized_startup_contract_pack_body()
+        based_on_hashes = dict(EMBEDDED_BASED_ON_HASHES)
+        pack_version = 1
+        pack_source = "embedded_fallback"
+        pack_doc_xid = None
+
+    stale_sources: list[dict[str, str | None]] = []
+    for xid in source_xids:
+        based_on = based_on_hashes.get(xid)
+        if based_on != source_hashes[xid]:
+            stale_sources.append(
+                {
+                    "xid": xid,
+                    "based_on_hash": based_on,
+                    "live_hash": source_hashes[xid],
+                }
+            )
     return {
         "mode": "required_startup_contract_pack",
-        "pack_version": 1,
+        "pack_version": pack_version,
+        "pack_source": pack_source,
+        "pack_doc_xid": pack_doc_xid,
         "source_xids": source_xids,
         "source_hashes": source_hashes,
-        "pack_hash": startup_contract_pack_hash(),
-        "body": normalized_startup_contract_pack_body(),
+        "based_on_hashes": based_on_hashes,
+        "stale": bool(stale_sources),
+        "stale_sources": stale_sources,
+        "pack_hash": stable_hash(body),
+        "body": body,
     }
 
 
-def _fresh_skill_entry(entry: SkillCatalogEntry, root: Path) -> SkillCatalogEntry:
-    meta_path = root / entry.meta_path
-    if not meta_path.exists():
-        return entry
-    return _build_skill_entry(root, meta_path)
-
-
-def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
+def _build_skill_entry(root: Path, ownership: Ownership | None, meta_path: Path) -> SkillCatalogEntry:
     text = read_text(meta_path)
     meta = parse_meta_bullets(text)
     skill_id = str(meta.get("skill_id") or meta_path.parent.name)
@@ -767,7 +1033,7 @@ def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
     skill_text = read_text(skill_doc) if skill_doc.exists() else ""
     missing = _missing_skill_fields(meta, skill_doc.exists())
     knowledge_refs = scalar_list(meta, "knowledge_refs")
-    capability_refs = scalar_list(meta, "capability_refs")
+    knowledge_slots = _parse_knowledge_slots(meta)
     closure = ClosureContract(
         closure_conditions=scalar_list(meta, "closure")
         or _section_bullets(skill_text, "Closure"),
@@ -777,19 +1043,22 @@ def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
             _nested_value(meta, "os_contract", "worklist_policy") or "required"
         ),
     )
+    rel_meta = relative_to_repo(meta_path, root)
     return SkillCatalogEntry(
         skill_id=skill_id,
         title=first_heading(skill_text or text, skill_id),
         summary=str(meta.get("summary") or first_paragraph(skill_text)),
         maturity=str(meta.get("maturity") or "unknown"),
-        capabilities=[_xref_to_id(item) for item in capability_refs],
         intent=_derive_intent(meta),
         target_artifacts=_derive_target_artifacts(meta),
         applies_when=scalar_list(meta, "applies_when")
         or scalar_list(meta, "use_when"),
         not_for=scalar_list(meta, "not_for")
         or _split_constraints(str(meta.get("constraints") or "")),
-        required_knowledge=[_knowledge_req(item) for item in knowledge_refs],
+        required_knowledge=(
+            [_knowledge_req(item) for item in knowledge_refs]
+            + [_bind_knowledge_req(slot) for slot in knowledge_slots if slot.get("bind")]
+        ),
         required_tools=[_required_tool(item) for item in scalar_list(meta, "required_tools")],
         inputs=scalar_list(meta, "input"),
         outputs=scalar_list(meta, "output"),
@@ -799,60 +1068,90 @@ def _build_skill_entry(root: Path, meta_path: Path) -> SkillCatalogEntry:
         skill_content=skill_text,
         skill_links=markdown_xid_link_targets(skill_text),
         path=relative_to_repo(skill_doc, root) if skill_doc.exists() else "",
-        meta_path=relative_to_repo(meta_path, root),
+        meta_path=rel_meta,
+        context_size=_skill_context_size(
+            text,
+            skill_text,
+            scalar_list(meta, "output"),
+            closure,
+        ),
+        # Skill-centric consolidation (083/084): surface the triad and declared
+        # needs as an additive superset. `responsibility` is the new explicit
+        # field that replaces role_responsibilities.executor (which was always a
+        # responsibility, not a role). Empty where a meta has not adopted the new
+        # fields yet; the legacy nested bullets stay opaque in meta_content.
+        capability=str(meta.get("capability") or ""),
+        tuning=str(meta.get("tuning") or ""),
+        responsibility=str(meta.get("responsibility") or ""),
+        preconditions=scalar_list(meta, "preconditions"),
+        knowledge_slots=knowledge_slots,
         missing=missing,
+        zone_metadata=_zone_metadata(ownership, rel_meta),
     )
 
 
-def _build_skills(root: Path) -> list[SkillCatalogEntry]:
-    entries: list[SkillCatalogEntry] = []
-    for meta_path in sorted((root / "skills").glob("**/meta.md")):
-        entries.append(_build_skill_entry(root, meta_path))
-    return entries
+def _slot_int(value: object, default: int = 0) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
-def _build_workflows(root: Path) -> list[WorkflowCatalogEntry]:
-    flows_root = root / "flows"
-    if not flows_root.exists():
+def _slot_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
+
+
+def _parse_slot_spec(spec: str) -> dict:
+    """Parse a compact meta slot spec that the bullet parser can carry.
+
+    Interim markdown form (until the meta schema settles in the XRefKit-side
+    migration): `name=<slot>; query=<text>; domain=<d>; min=<n>; required;
+    bind=<xid>`. Fields are `;`-separated `key=value` pairs (a bare token means
+    `token=true`), so a `query` may contain spaces. `name` normalizes to `slot`.
+    """
+    slot: dict = {}
+    for field_text in spec.split(";"):
+        field_text = field_text.strip()
+        if not field_text:
+            continue
+        if "=" in field_text:
+            key, _, val = field_text.partition("=")
+            key, val = key.strip(), val.strip()
+        else:
+            key, val = field_text, "true"
+        slot[key] = val
+    if "name" in slot and "slot" not in slot:
+        slot["slot"] = slot.pop("name")
+    return slot
+
+
+def _parse_knowledge_slots(meta: dict) -> list[dict]:
+    """Normalize declared knowledge slots (design 082 Decision 3).
+
+    Slots are the meta-declared knowledge needs that replace static
+    knowledge_refs; each is resolved at runtime against the base+local catalog.
+    Tolerant during the transition: returns [] when a meta has not adopted
+    knowledge_slots yet, parses compact string specs, and passes mapping entries
+    through unchanged.
+    """
+    value = meta.get("knowledge_slots")
+    if not isinstance(value, list):
         return []
-    entries: list[WorkflowCatalogEntry] = []
-    for path in sorted(flows_root.glob("**/*.yaml")):
-        text = read_text(path)
-        scalar = _yaml_top_scalars(text)
-        owner = _yaml_nested_scalar(text, "owner", "primary")
-        entry = scalar.get("entry")
-        steps = _yaml_map_keys(text, "steps")
-        sequence = _yaml_top_list(text, "sequence")
-        capabilities = _yaml_values_for_key(text, "capability")
-        schema_style = "unknown"
-        if steps:
-            schema_style = "deterministic_steps"
-        elif sequence:
-            schema_style = "legacy_sequence"
-        missing: list[str] = []
-        for field in ["flow_id", "name", "doc_xid"]:
-            if not scalar.get(field):
-                missing.append(field)
-        if schema_style == "deterministic_steps" and not entry:
-            missing.append("entry")
-        entries.append(
-            WorkflowCatalogEntry(
-                flow_id=scalar.get("flow_id") or path.stem,
-                name=scalar.get("name") or path.stem,
-                doc_xid=scalar.get("doc_xid"),
-                phase=scalar.get("phase"),
-                owner=owner,
-                path=relative_to_repo(path, root),
-                schema_style=schema_style,  # type: ignore[arg-type]
-                entry=entry,
-                steps=steps,
-                sequence=sequence,
-                capabilities=capabilities,
-                runs_after=_yaml_top_list(text, "runs_after"),
-                runs_before=_yaml_top_list(text, "runs_before"),
-                missing=missing,
-            )
-        )
+    slots: list[dict] = []
+    for item in value:
+        if isinstance(item, dict):
+            slots.append(dict(item))
+        elif isinstance(item, str) and item.strip():
+            slots.append(_parse_slot_spec(item))
+    return slots
+
+
+def _build_skills(root: Path, ownership: Ownership | None = None) -> list[SkillCatalogEntry]:
+    entries: list[SkillCatalogEntry] = []
+    for meta_path in _content_files(root, ownership, "skills", "meta.md"):
+        entries.append(_build_skill_entry(root, ownership, meta_path))
     return entries
 
 
@@ -903,6 +1202,12 @@ def _client_tool_distribution(root: Path) -> ClientToolDistribution:
             "Run Python tools on the client side with the client repository root as the working directory.",
             "Some tools expect sibling tools modules, so preserve the returned directory layout.",
             "Some tools call external programs such as git, dotnet, npm, or project-specific commands; satisfy those prerequisites on the client side before execution.",
+            "structure_graph is an analysis/build-side tool, not a baseline "
+            "client dependency: the client consumes its output as findings "
+            "knowledge, not the tool. If a specific Skill needs structure_graph "
+            "client-side, that Skill declares and provisions it (Skill-scoped, "
+            "prompt-supplemented); XRefKit.StructureGraph is not a global client "
+            "requirement.",
             "This distribution also includes Skill-embedded scripts under skills/**/*.py that a Skill's SKILL.md instructs running directly by relative path (e.g. skills/<id>/scripts/*.py). get_client_tool_pip_package's tools/-only package does not include these; use get_client_tool_file or get_client_tool_bundle for them.",
         ],
     )
@@ -1009,16 +1314,18 @@ def _fm_runtime_pip_package(root: Path) -> ClientToolPipPackage:
     package_root = f"{FM_RUNTIME_PACKAGE_ID}-{version}"
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
+        _zip_writestr(
+            archive,
             f"{package_root}/pyproject.toml",
             _fm_runtime_pyproject(version),
         )
-        archive.writestr(
+        _zip_writestr(
+            archive,
             f"{package_root}/README.md",
             _fm_runtime_readme(),
         )
         for file in files:
-            archive.writestr(f"{package_root}/{file.path}", file.content)
+            _zip_writestr(archive, f"{package_root}/{file.path}", file.content)
     content = buffer.getvalue()
     encoded = base64.b64encode(content).decode("ascii")
     return ClientToolPipPackage(
@@ -1085,8 +1392,9 @@ def _client_obligations() -> list[ClientObligation]:
             enforcement_owner="server",
             verification=(
                 "get_document_by_xid, get_skill, get_skill_requirements, "
-                "list_workflows, expand_knowledge, get_knowledge_summary, and "
-                "build_knowledge_context reject the call for any MCP session "
+                "expand_knowledge, get_knowledge_summary, "
+                "build_knowledge_context, and list_skills with "
+                "include_content=true reject the call for any MCP session "
                 "that has not first called get_startup_context"
             ),
         ),
@@ -1191,14 +1499,6 @@ def _semantic_routing_references() -> list[dict[str, object]]:
             "body_mode": "lazy",
         },
         {
-            "id": "workflows",
-            "purpose": "semantic workflow routing and workflow-order lookup",
-            "summary_tool": "list_workflows",
-            "materialize_tool": "get_document_by_xid",
-            "materialize_argument": "doc_xid",
-            "body_mode": "lazy",
-        },
-        {
             "id": "knowledge",
             "purpose": "domain-knowledge search after a task or Skill needs evidence",
             "summary_tool": "search_knowledge_catalog",
@@ -1232,6 +1532,56 @@ def _client_tool_download_policy(entry: SkillCatalogEntry) -> dict[str, object]:
         "file_tool": "get_client_tool_file",
         "bundle_tool": "get_client_tool_bundle",
         "version_check_tool": "check_client_tool_versions",
+    }
+
+
+def _skill_context_size(
+    meta_content: str,
+    skill_content: str,
+    outputs: list[str],
+    closure: ClosureContract,
+) -> dict[str, object]:
+    meta_size = _text_size(meta_content)
+    skill_size = _text_size(skill_content)
+    read_size = _sum_text_sizes([meta_size, skill_size])
+    write_contract_size = _text_size(
+        "\n".join(
+            [
+                *outputs,
+                *closure.closure_conditions,
+                *closure.exit_enum,
+                closure.handoff_policy,
+                closure.worklist_policy,
+            ]
+        )
+    )
+    return {
+        "unit": "estimated_tokens",
+        "estimator": "ceil(characters / 4)",
+        "model_tokenizer": None,
+        "read": read_size,
+        "write_contract": write_contract_size,
+        "write_contract_note": "Declared output and closure contract size only; actual generated output tokens are runtime-dependent.",
+        "meta": meta_size,
+        "skill": skill_size,
+        "total": read_size,
+    }
+
+
+def _text_size(value: str) -> dict[str, int]:
+    characters = len(value)
+    return {
+        "bytes_utf8": len(value.encode("utf-8")),
+        "characters": characters,
+        "estimated_tokens": (characters + 3) // 4,
+    }
+
+
+def _sum_text_sizes(sizes: list[dict[str, int]]) -> dict[str, int]:
+    return {
+        "bytes_utf8": sum(size["bytes_utf8"] for size in sizes),
+        "characters": sum(size["characters"] for size in sizes),
+        "estimated_tokens": sum(size["estimated_tokens"] for size in sizes),
     }
 
 
@@ -1339,7 +1689,31 @@ def _session_context_deduplication() -> dict[str, object]:
     }
 
 
+def _repository_zones(ownership: Ownership | None) -> dict[str, object]:
+    if ownership is None:
+        return {
+            "ownership_enabled": False,
+            "ownership_hash": None,
+            "zone_ids": [],
+            "local_packs_declared": False,
+            "catalog_roots_are_zone_aware": False,
+        }
+    zone_ids = [zone.id for zone in ownership.zones]
+    return {
+        "ownership_enabled": True,
+        "ownership_hash": ownership.content_hash,
+        "zone_ids": zone_ids,
+        "local_packs_declared": any(zone.id == "local-packs" for zone in ownership.zones),
+        "catalog_roots_are_zone_aware": True,
+    }
+
+
 def _client_tool_files(root: Path) -> list[ClientToolFile]:
+    ownership = load_ownership(root)
+    if ownership is not None:
+        errors = validate_ownership(root, ownership)
+        if errors:
+            raise ValueError("invalid ownership.yaml: " + "; ".join(errors))
     tools_root = root / "tools"
     paths: list[Path] = []
     support_paths: list[Path] = []
@@ -1367,6 +1741,24 @@ def _client_tool_files(root: Path) -> list[ClientToolFile]:
                 path
                 for path in skills_root.glob("**/*.py")
                 if "__pycache__" not in path.parts
+            )
+        )
+    packs_root = root / "packs"
+    if ownership is not None and packs_root.exists():
+        paths.extend(
+            sorted(
+                path
+                for path in packs_root.glob("*/skills/**/*.py")
+                if "__pycache__" not in path.parts
+                and ownership.distribution_enabled(relative_to_repo(path, root))
+            )
+        )
+        paths.extend(
+            sorted(
+                path
+                for path in packs_root.glob("local/*/skills/**/*.py")
+                if "__pycache__" not in path.parts
+                and ownership.distribution_enabled(relative_to_repo(path, root))
             )
         )
 
@@ -1402,20 +1794,23 @@ def _client_tool_pip_package(root: Path) -> ClientToolPipPackage:
     package_root = f"xrefkit-client-tools-{CLIENT_TOOL_PACKAGE_VERSION}"
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
+        _zip_writestr(
+            archive,
             f"{package_root}/pyproject.toml",
             _client_tools_pyproject(files),
         )
-        archive.writestr(
+        _zip_writestr(
+            archive,
             f"{package_root}/README.md",
             _client_tools_readme(),
         )
-        archive.writestr(
+        _zip_writestr(
+            archive,
             f"{package_root}/tools/__init__.py",
             '"""Client-side XRefKit deterministic tools."""\n',
         )
         for file in files:
-            archive.writestr(f"{package_root}/{file.path}", file.content)
+            _zip_writestr(archive, f"{package_root}/{file.path}", file.content)
     content = buffer.getvalue()
     encoded = base64.b64encode(content).decode("ascii")
     return ClientToolPipPackage(
@@ -1430,7 +1825,12 @@ def _client_tool_pip_package(root: Path) -> ClientToolPipPackage:
         warnings=[
             "This package installs a top-level tools package to preserve existing XRefKit imports such as tools.error_policy_locator.",
             "Install in a project virtual environment to avoid conflicts with any unrelated package named tools.",
-            "The package contains Python tools only; C# tools/structure_graph is not bundled.",
+            "The package contains Python tools only; C# tools/structure_graph "
+            "is not bundled. Install it as the NuGet dotnet tool "
+            "XRefKit.StructureGraph (command dotnet-xrefkit-graph), build it "
+            "from source, or receive precomputed graph JSON; see "
+            "docs/guides/078_structure_graph_build_guide.md (resolve via "
+            "get_document_by_xid with xid 8B3E5D0A94C7).",
             "The MCP server only distributes the package; tool execution is client-side.",
             "Skill-embedded scripts under skills/**/*.py are not included in this "
             "package. Fetch them with get_client_tool_file or "
@@ -1490,6 +1890,17 @@ Some tools require external programs such as git, dotnet, npm, or precomputed
 """
 
 
+def _zip_writestr(archive: zipfile.ZipFile, name: str, content: str) -> None:
+    # Fixed timestamp keeps rebuilt package bytes identical for identical
+    # inputs, so a sha256 handed out earlier (for example in an MCP response
+    # pointing at the HTTP /dist endpoint) still matches the artifact built
+    # at download time.
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o644 << 16
+    archive.writestr(info, content)
+
+
 def hashlib_sha256_bytes(content: bytes) -> str:
     import hashlib
 
@@ -1540,7 +1951,7 @@ def _runtime_role_contract() -> RuntimeRoleContract:
             "python -m fm skill verify --log <run-log>",
             "python -m fm skill close --log <run-log>",
         ],
-        source_xids=["B7A2C94F0E61", "6D2E4A9C0B71", "4C7E9A2B1D63", "1F93A7C24010"],
+        source_xids=["B7A2C94F0E61", "4C7E9A2B1D63"],
     )
 
 
@@ -1549,8 +1960,6 @@ def _missing_skill_fields(meta: dict[str, object], has_skill_doc: bool) -> list[
         "skill_id",
         "summary",
         "maturity",
-        "knowledge_refs",
-        "capability_refs",
         "input",
         "output",
     ]
@@ -1616,6 +2025,17 @@ def _knowledge_req(ref: str) -> dict[str, object]:
     }
 
 
+def _bind_knowledge_req(slot: dict) -> dict[str, object]:
+    # A pinned (bind) knowledge_slot is a required-knowledge XID; query slots are
+    # resolved dynamically via resolve_skill_knowledge instead.
+    return {
+        "xid": str(slot.get("bind")),
+        "version": 1,
+        "required_when": "declared by Skill meta knowledge_slot bind",
+        "detail_policy": "expand_on_demand",
+    }
+
+
 def _required_tool(name: str) -> dict[str, object]:
     if name.startswith("xref."):
         return {
@@ -1627,11 +2047,6 @@ def _required_tool(name: str) -> dict[str, object]:
         "execution_location": "client",
         "required_when": "declared by Skill meta required_tools",
     }
-
-
-def _xref_to_id(ref: str) -> str:
-    xid_match = re.search(r"#xid-([A-Za-z0-9]+)", ref)
-    return xid_match.group(1) if xid_match else ref
 
 
 def _section_bullets(text: str, heading: str) -> list[str]:

@@ -10,6 +10,7 @@ from typing import Any
 
 from . import __version__
 from .catalog import XRefCatalog
+from .dist import DIST_ROUTE_PATH, ArtifactDistribution, add_dist_routes
 
 SERVER_VERSION = __version__
 LOGGER = logging.getLogger(__name__)
@@ -116,6 +117,18 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="PEM private key for HTTPS streamable-http",
     )
+    parser.add_argument(
+        "--public-base-url",
+        help="Base URL clients use to reach this server (for artifact "
+        "distribution URLs). Defaults to scheme://host:port from the "
+        "transport options.",
+    )
+    parser.add_argument(
+        "--dist-extra-dir",
+        type=Path,
+        help="Directory of additional artifacts (for example PyYAML wheels) "
+        "to mirror on the /dist routes for clients without PyPI access.",
+    )
     args = parser.parse_args(argv)
     try:
         _validate_tls_configuration(
@@ -127,6 +140,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     catalog = XRefCatalog.build(Path(args.repo))
+
+    # Artifact distribution runs only on the network transport: executable
+    # artifacts are served as plain HTTP downloads next to the MCP endpoint
+    # so package bytes never travel through an MCP tool result (and thus
+    # never enter an AI client's model context). On stdio the client is
+    # local and the in-band base64 responses remain the fallback.
+    dist: ArtifactDistribution | None = None
+    dist_base_url = ""
+    if args.transport == "streamable-http":
+        dist = ArtifactDistribution(catalog, args.dist_extra_dir)
+        scheme = "https" if args.ssl_certfile else "http"
+        dist_base_url = args.public_base_url or f"{scheme}://{args.host}:{args.port}"
 
     try:
         from mcp.server.fastmcp import Context, FastMCP
@@ -163,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
         for xid in result.get("load_order", []):
             _log_xid_query("get_startup_context", xid)
         _mark_startup_loaded(ctx)
+        if dist is not None:
+            result = _with_artifact_distribution(result, dist, dist_base_url)
         return result
 
     @app.tool()
@@ -205,9 +232,16 @@ def main(argv: list[str] | None = None) -> int:
 
     @app.tool()
     def list_skills(
+        ctx: Context,
         limit: int | None = None,
-        include_content: bool = True,
+        include_content: bool = False,
     ) -> list[dict[str, Any]]:
+        # Metadata-only listing stays ungated as a routing surface (like
+        # search_knowledge_catalog and rank_skills_for_purpose); full
+        # procedure bodies are governance content and require the startup
+        # context first, matching get_skill.
+        if include_content:
+            _require_startup_loaded(ctx, "list_skills(include_content=true)")
         return catalog.list_skills(limit, include_content)
 
     @app.tool()
@@ -222,16 +256,16 @@ def main(argv: list[str] | None = None) -> int:
         return _with_control_reminder(result)
 
     @app.tool()
-    def list_workflows(ctx: Context) -> list[dict[str, Any]]:
-        _require_startup_loaded(ctx, "list_workflows")
-        return catalog.list_workflows()
-
-    @app.tool()
     def get_skill_requirements(ctx: Context, skill_id: str) -> dict[str, Any]:
         _require_startup_loaded(ctx, "get_skill_requirements")
         result = catalog.get_skill_requirements(skill_id)
         _unlock_client_tools(ctx)
         return _with_control_reminder(result)
+
+    @app.tool()
+    def resolve_skill_knowledge(ctx: Context, skill_id: str) -> dict[str, Any]:
+        _require_startup_loaded(ctx, "resolve_skill_knowledge")
+        return _with_control_reminder(catalog.resolve_skill_knowledge(skill_id))
 
     @app.tool()
     def rank_skills_for_purpose(purpose: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -244,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
     @app.tool()
     def get_client_tool_manifest(ctx: Context) -> dict[str, Any]:
         _require_client_tools_unlocked(ctx, "get_client_tool_manifest")
-        return catalog.get_client_tool_manifest()
+        return _with_http_distribution(catalog.get_client_tool_manifest(), dist, dist_base_url)
 
     @app.tool()
     def get_client_tool_file(ctx: Context, path: str) -> dict[str, Any]:
@@ -254,12 +288,15 @@ def main(argv: list[str] | None = None) -> int:
     @app.tool()
     def get_client_tool_bundle(ctx: Context) -> dict[str, Any]:
         _require_client_tools_unlocked(ctx, "get_client_tool_bundle")
-        return catalog.get_client_tool_bundle()
+        return _with_http_distribution(catalog.get_client_tool_bundle(), dist, dist_base_url)
 
     @app.tool()
     def get_client_tool_pip_package(ctx: Context) -> dict[str, Any]:
         _require_client_tools_unlocked(ctx, "get_client_tool_pip_package")
-        return catalog.get_client_tool_pip_package()
+        result = catalog.get_client_tool_pip_package()
+        if dist is not None:
+            result = _pip_package_http_response(result, dist_base_url)
+        return result
 
     @app.tool()
     def check_client_tool_versions(installed: dict[str, str] | None = None) -> dict[str, Any]:
@@ -271,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     @app.tool()
     def get_fm_runtime_manifest(ctx: Context) -> dict[str, Any]:
         _require_startup_loaded(ctx, "get_fm_runtime_manifest")
-        return catalog.get_fm_runtime_manifest()
+        return _with_http_distribution(catalog.get_fm_runtime_manifest(), dist, dist_base_url)
 
     @app.tool()
     def get_fm_runtime_file(ctx: Context, path: str) -> dict[str, Any]:
@@ -281,12 +318,15 @@ def main(argv: list[str] | None = None) -> int:
     @app.tool()
     def get_fm_runtime_bundle(ctx: Context) -> dict[str, Any]:
         _require_startup_loaded(ctx, "get_fm_runtime_bundle")
-        return catalog.get_fm_runtime_bundle()
+        return _with_http_distribution(catalog.get_fm_runtime_bundle(), dist, dist_base_url)
 
     @app.tool()
     def get_fm_runtime_pip_package(ctx: Context) -> dict[str, Any]:
         _require_startup_loaded(ctx, "get_fm_runtime_pip_package")
-        return catalog.get_fm_runtime_pip_package()
+        result = catalog.get_fm_runtime_pip_package()
+        if dist is not None:
+            result = _pip_package_http_response(result, dist_base_url)
+        return result
 
     @app.tool()
     def check_fm_runtime_version(installed: dict[str, str] | None = None) -> dict[str, Any]:
@@ -301,10 +341,83 @@ def main(argv: list[str] | None = None) -> int:
             args.log_level,
             args.ssl_certfile,
             args.ssl_keyfile,
+            dist,
+            dist_base_url,
         )
     else:
         app.run(transport=args.transport)
     return 0
+
+
+def _pip_package_http_response(result: dict[str, Any], dist_base_url: str) -> dict[str, Any]:
+    """Replace in-band base64 bytes with a plain-HTTP download reference."""
+    filename = result["filename"]
+    url = f"{dist_base_url.rstrip('/')}{DIST_ROUTE_PATH}/{filename}"
+    slim = dict(result)
+    slim["content_base64"] = None
+    slim["content_omitted"] = True
+    slim["download_url"] = url
+    slim["download_transport"] = "plain_http"
+    slim["download_instructions"] = [
+        "Download the package out-of-band with plain HTTP GET (bootstrap "
+        "script, curl, or pip --find-links); do not route package bytes "
+        "through MCP tool results or the model context.",
+        f"Verify the download against content_hash (sha256) before "
+        f"installing: {result['content_hash']}",
+    ]
+    return slim
+
+
+def _with_http_distribution(
+    result: dict[str, Any],
+    dist: Any,
+    dist_base_url: str,
+) -> dict[str, Any]:
+    if dist is None:
+        return result
+    base = dist_base_url.rstrip("/")
+    augmented = dict(result)
+    augmented["http_distribution"] = {
+        "preferred": True,
+        "index_json_url": f"{base}{DIST_ROUTE_PATH}/index.json",
+        "find_links_url": f"{base}{DIST_ROUTE_PATH}/",
+        "bootstrap_url": f"{base}{DIST_ROUTE_PATH}/bootstrap.py",
+        "reason": (
+            "Plain-HTTP artifact distribution is active on this server; "
+            "prefer it over in-band MCP file transfer so file bytes do not "
+            "enter the model context."
+        ),
+    }
+    return augmented
+
+
+def _with_artifact_distribution(
+    result: dict[str, Any],
+    dist: Any,
+    dist_base_url: str,
+) -> dict[str, Any]:
+    augmented = dict(result)
+    block = dist.describe_for_mcp(dist_base_url)
+    augmented["artifact_distribution"] = block
+    augmented["client_instructions"] = [
+        *result.get("client_instructions", []),
+        "Artifact distribution over plain HTTP is active: materialize the fm "
+        "runtime and client tools through artifact_distribution "
+        "(bootstrap.py or pip --no-index --find-links) instead of calling "
+        "get_fm_runtime_bundle or get_*_pip_package over MCP, so package "
+        "bytes never enter the model context.",
+    ]
+    core = dict(result.get("core_runtime_distribution") or {})
+    materialization = dict(core.get("materialization") or {})
+    materialization["http_download"] = {
+        "preferred": True,
+        "index_json_url": block["index_json_url"],
+        "bootstrap_url": block["bootstrap_url"],
+        "bootstrap_run": block["bootstrap_run"],
+    }
+    core["materialization"] = materialization
+    augmented["core_runtime_distribution"] = core
+    return augmented
 
 
 def _validate_tls_configuration(
@@ -353,6 +466,8 @@ def _run_streamable_http(
     log_level: str,
     ssl_certfile: Path | None = None,
     ssl_keyfile: Path | None = None,
+    dist: Any = None,
+    dist_base_url: str = "",
 ) -> None:
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -362,6 +477,8 @@ def _run_streamable_http(
 
     async def serve() -> None:
         starlette_app = app.streamable_http_app()
+        if dist is not None:
+            add_dist_routes(starlette_app, dist, dist_base_url)
         _add_streamable_http_probe_middleware(starlette_app, http_path)
         config = uvicorn.Config(
             starlette_app,
@@ -433,9 +550,11 @@ def _endpoint_info(http_path: str) -> dict[str, Any]:
         "version": SERVER_VERSION,
         "transport": "streamable-http",
         "endpoint": _normalize_path(http_path),
+        "artifact_distribution": DIST_ROUTE_PATH,
         "message": (
             "This is a Streamable HTTP MCP endpoint. MCP clients should use "
-            "POST and GET with Accept: application/json, text/event-stream."
+            "POST and GET with Accept: application/json, text/event-stream. "
+            f"Distributable artifacts are plain HTTP under {DIST_ROUTE_PATH}."
         ),
     }
 

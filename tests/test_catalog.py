@@ -190,10 +190,225 @@ if __name__ == "__main__":
         self.assertIn("Skill: sample_review", catalog.skills[0].skill_content)
         self.assertEqual(catalog.skills[0].skill_links[0]["xid"], "ABC123")
         self.assertEqual(catalog.skills[0].skill_links[0]["resolver_tool"], "get_document_by_xid")
+        self.assertEqual(catalog.skills[0].context_size["unit"], "estimated_tokens")
+        self.assertGreater(catalog.skills[0].context_size["meta"]["estimated_tokens"], 0)
+        self.assertGreater(catalog.skills[0].context_size["skill"]["estimated_tokens"], 0)
+        self.assertEqual(
+            catalog.skills[0].context_size["total"]["estimated_tokens"],
+            catalog.skills[0].context_size["meta"]["estimated_tokens"]
+            + catalog.skills[0].context_size["skill"]["estimated_tokens"],
+        )
+        self.assertEqual(
+            catalog.skills[0].context_size["read"],
+            catalog.skills[0].context_size["total"],
+        )
+        self.assertGreater(
+            catalog.skills[0].context_size["write_contract"]["estimated_tokens"],
+            0,
+        )
+        self.assertIn("runtime-dependent", catalog.skills[0].context_size["write_contract_note"])
         self.assertEqual(
             catalog.get_repository_identity()["cache_namespace"],
             catalog.repository_fingerprint,
         )
+
+    def test_pack_roots_require_ownership_metadata(self) -> None:
+        write(
+            self.repo / "packs" / "business-intake" / "knowledge" / "pack-rule.md",
+            """<!-- xid: PACKRULE123 -->
+<a id="xid-PACKRULE123"></a>
+
+# Pack Rule
+
+Pack-local rule.
+""",
+        )
+        write(
+            self.repo / "packs" / "business-intake" / "skills" / "pack_sample" / "meta.md",
+            """# Skill Meta: pack_sample
+
+- skill_id: `pack_sample`
+- summary: pack sample
+- skill_doc: `./SKILL.md`
+- maturity: `trial`
+""",
+        )
+        write(
+            self.repo / "packs" / "business-intake" / "skills" / "pack_sample" / "SKILL.md",
+            "# Pack Sample\n",
+        )
+        without_ownership = XRefCatalog.build(self.repo)
+
+        self.assertNotIn("PACKRULE123", [entry.xid for entry in without_ownership.knowledge])
+        self.assertNotIn("pack_sample", [entry.skill_id for entry in without_ownership.skills])
+
+        write(
+            self.repo / "ownership.yaml",
+            """zones:
+  - id: shared-packs
+    owner: pack
+    paths:
+      - packs/*/
+    catalog: true
+    distribution: true
+    base_sync: true
+    shadowing: true
+""",
+        )
+
+        with_ownership = XRefCatalog.build(self.repo)
+        pack_knowledge = next(entry for entry in with_ownership.knowledge if entry.xid == "PACKRULE123")
+        pack_skill = next(entry for entry in with_ownership.skills if entry.skill_id == "pack_sample")
+
+        self.assertEqual("shared-packs", pack_knowledge.zone_metadata["zone"])
+        self.assertEqual("business-intake", pack_skill.zone_metadata["pack_id"])
+        self.assertTrue(with_ownership.get_startup_context()["repository_zones"]["ownership_enabled"])
+
+    def test_get_document_by_xid_fails_closed_on_duplicate_xid(self) -> None:
+        write(
+            self.repo / "ownership.yaml",
+            """zones:
+  - id: shared-packs
+    owner: pack
+    paths:
+      - packs/*/
+    catalog: true
+    distribution: true
+    base_sync: true
+    shadowing: true
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "knowledge" / "duplicate.md",
+            """<!-- xid: ABC123 -->
+<a id="xid-ABC123"></a>
+
+# Duplicate
+
+Duplicate body.
+""",
+        )
+        catalog = XRefCatalog.build(self.repo)
+
+        result = catalog.get_document_by_xid("ABC123")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("xid_conflict", result["error"])
+        self.assertEqual(2, len(result["matches"]))
+        self.assertEqual(
+            sorted(["knowledge/organization/rules.md", "packs/business/knowledge/duplicate.md"]),
+            sorted(match["path"] for match in result["matches"]),
+        )
+
+    def test_get_skill_fails_closed_on_duplicate_skill_id(self) -> None:
+        write(
+            self.repo / "ownership.yaml",
+            """zones:
+  - id: shared-packs
+    owner: pack
+    paths:
+      - packs/*/
+    catalog: true
+    distribution: true
+    base_sync: true
+    shadowing: true
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "skills" / "sample_duplicate" / "meta.md",
+            """# Skill Meta: sample duplicate
+
+- skill_id: `sample_review`
+- summary: duplicate sample
+- skill_doc: `./SKILL.md`
+- maturity: `trial`
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "skills" / "sample_duplicate" / "SKILL.md",
+            "# Duplicate Skill\n",
+        )
+        catalog = XRefCatalog.build(self.repo)
+
+        listed = [entry for entry in catalog.list_skills() if entry["skill_id"] == "sample_review"]
+
+        self.assertEqual(2, len(listed))
+        self.assertTrue(all(entry["zone_metadata"]["identity_conflict"] for entry in listed))
+        with self.assertRaises(ValueError):
+            catalog.get_skill("sample_review")
+
+    def test_pack_skill_scripts_are_distributed_but_local_pack_scripts_are_not(self) -> None:
+        write(
+            self.repo / "ownership.yaml",
+            """zones:
+  - id: local-packs
+    owner: local
+    paths:
+      - packs/local/
+    catalog: true
+    distribution: false
+    base_sync: false
+    shadowing: true
+  - id: shared-packs
+    owner: pack
+    paths:
+      - packs/*/
+    catalog: true
+    distribution: true
+    base_sync: true
+    shadowing: true
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "skills" / "pack_sample" / "scripts" / "shared_tool.py",
+            "print('shared')\n",
+        )
+        write(
+            self.repo / "packs" / "local" / "acme" / "skills" / "local_sample" / "scripts" / "local_tool.py",
+            "print('local')\n",
+        )
+        catalog = XRefCatalog.build(self.repo)
+
+        paths = [file["path"] for file in catalog.get_client_tool_bundle()["files"]]
+
+        self.assertIn("packs/business/skills/pack_sample/scripts/shared_tool.py", paths)
+        self.assertNotIn("packs/local/acme/skills/local_sample/scripts/local_tool.py", paths)
+
+    def test_rank_skills_includes_pack_skill_when_ownership_exists(self) -> None:
+        write(
+            self.repo / "ownership.yaml",
+            """zones:
+  - id: shared-packs
+    owner: pack
+    paths:
+      - packs/*/
+    catalog: true
+    distribution: true
+    base_sync: true
+    shadowing: true
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "skills" / "layout_zone" / "meta.md",
+            """# Skill Meta: layout_zone
+
+- skill_id: `layout_zone`
+- summary: migrate repository layout zones and ownership packs
+- applies_when:
+  - repository layout zone migration
+- skill_doc: `./SKILL.md`
+- maturity: `trial`
+""",
+        )
+        write(
+            self.repo / "packs" / "business" / "skills" / "layout_zone" / "SKILL.md",
+            "# Layout Zone\n",
+        )
+        catalog = XRefCatalog.build(self.repo)
+
+        ranked = catalog.rank_skills_for_purpose("repository layout zone migration", limit=3)
+
+        self.assertIn("layout_zone", [entry["skill_id"] for entry in ranked])
 
     def test_expands_knowledge_by_xid(self) -> None:
         catalog = XRefCatalog.build(self.repo)
@@ -270,6 +485,23 @@ if __name__ == "__main__":
                 self.assertEqual(document["cache_status"], "not_modified")
                 self.assertNotIn("content", document)
 
+    def test_list_skills_defaults_to_metadata_only(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+
+        skill = catalog.list_skills()[0]
+
+        self.assertIsNone(skill["meta_content"])
+        self.assertIsNone(skill["skill_content"])
+        self.assertTrue(skill["document_versions"])
+
+    def test_list_skills_returns_bodies_only_when_requested(self) -> None:
+        catalog = XRefCatalog.build(self.repo)
+
+        skill = catalog.list_skills(include_content=True)[0]
+
+        self.assertIn("Skill: sample_review", skill["skill_content"])
+        self.assertIn("skill_id", skill["meta_content"])
+
     def test_list_skills_can_exclude_document_bodies(self) -> None:
         catalog = XRefCatalog.build(self.repo)
 
@@ -277,9 +509,138 @@ if __name__ == "__main__":
 
         self.assertIsNone(skill["meta_content"])
         self.assertIsNone(skill["skill_content"])
+        self.assertEqual(skill["context_size"]["unit"], "estimated_tokens")
+        self.assertGreater(skill["context_size"]["total"]["estimated_tokens"], 0)
+        self.assertEqual(skill["context_size"]["read"], skill["context_size"]["total"])
+        self.assertGreater(skill["context_size"]["write_contract"]["estimated_tokens"], 0)
         self.assertEqual(
             {document["xid"] for document in skill["document_versions"]},
             {"SKILLMETA", "SKILLDOC"},
+        )
+
+    def test_surfaces_triad_preconditions_and_knowledge_slots(self) -> None:
+        # Skill-centric consolidation (design 083/084): the catalog surfaces the
+        # capability/tuning/responsibility triad and declared needs as an
+        # additive superset. `responsibility` is the explicit field that
+        # replaces role_responsibilities.executor.
+        write(
+            self.repo / "skills" / "triad_sample" / "meta.md",
+            """<!-- xid: TRIADMETA -->
+# Skill Meta: triad_sample
+
+- skill_id: `triad_sample`
+- summary: review with the new triad fields
+- maturity: `trial`
+- capability: software_development
+- tuning: C#
+- responsibility: quality check
+- preconditions:
+  - implemented code exists
+  - design evidence exists
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "triad_sample" / "SKILL.md",
+            "<!-- xid: TRIADDOC -->\n# Skill: triad_sample\n",
+        )
+
+        catalog = XRefCatalog.build(self.repo)
+        skill = next(
+            entry for entry in catalog.list_skills() if entry["skill_id"] == "triad_sample"
+        )
+
+        self.assertEqual(skill["capability"], "software_development")
+        self.assertEqual(skill["tuning"], "C#")
+        self.assertEqual(skill["responsibility"], "quality check")
+        self.assertIn("implemented code exists", skill["preconditions"])
+        self.assertEqual(skill["knowledge_slots"], [])
+
+        legacy = next(
+            entry for entry in catalog.list_skills() if entry["skill_id"] == "sample_review"
+        )
+        self.assertEqual(legacy["capability"], "")
+        self.assertEqual(legacy["knowledge_slots"], [])
+
+    def test_resolve_skill_knowledge_resolves_slots(self) -> None:
+        # Design 082 D3 / 084 M5: slots declare needs (query or pinned bind XID)
+        # resolved dynamically over the base+local knowledge catalog.
+        write(
+            self.repo / "skills" / "slot_sample" / "meta.md",
+            """<!-- xid: SLOTMETA -->
+# Skill Meta: slot_sample
+
+- skill_id: `slot_sample`
+- summary: skill with knowledge slots
+- maturity: `trial`
+- capability: software_development
+- responsibility: quality check
+- knowledge_slots:
+  - name=context; query=context rules external input; domain=organization; min=1; required
+  - name=context_pin; bind=ABC123
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "slot_sample" / "SKILL.md",
+            "<!-- xid: SLOTDOC -->\n# Skill: slot_sample\n",
+        )
+
+        catalog = XRefCatalog.build(self.repo)
+        result = catalog.resolve_skill_knowledge("slot_sample")
+
+        self.assertEqual(result["skill_id"], "slot_sample")
+        self.assertEqual(len(result["slots"]), 2)
+
+        query_slot = result["slots"][0]
+        self.assertEqual(query_slot["slot"], "context")
+        self.assertTrue(query_slot["required"])
+        self.assertEqual(query_slot["domain"], "organization")
+        self.assertTrue(query_slot["satisfied"])
+        self.assertTrue(
+            any(candidate["xid"] == "ABC123" for candidate in query_slot["candidates"])
+        )
+
+        bind_slot = result["slots"][1]
+        self.assertEqual(bind_slot["bind"], "ABC123")
+        self.assertEqual(bind_slot["candidates"][0]["xid"], "ABC123")
+
+        self.assertEqual(result["unsatisfied_required"], [])
+
+    def test_rank_skills_uses_triad_facets_and_reports_preconditions(self) -> None:
+        # Design 084 M4: the triad is the routing vocabulary; declared
+        # preconditions travel with the ranking.
+        write(
+            self.repo / "skills" / "triad_rank" / "meta.md",
+            """<!-- xid: TRIADRANKMETA -->
+# Skill Meta: triad_rank
+
+- skill_id: `triad_rank`
+- summary: triad-routed review skill
+- maturity: `trial`
+- capability: software_development
+- tuning: C#
+- responsibility: quality check
+- preconditions:
+  - implemented code exists
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "triad_rank" / "SKILL.md",
+            "<!-- xid: TRIADRANKDOC -->\n# Skill: triad_rank\n",
+        )
+
+        catalog = XRefCatalog.build(self.repo)
+        ranked = catalog.rank_skills_for_purpose("software_development C# quality check")
+        entry = next(item for item in ranked if item["skill_id"] == "triad_rank")
+
+        facet_labels = {facet.split("=", 1)[0] for facet in entry["matched_facets"]}
+        self.assertIn("capability", facet_labels)
+        self.assertIn("tuning", facet_labels)
+        self.assertIn(
+            "implemented code exists",
+            entry["execution_readiness"]["declared_preconditions"],
         )
 
     def test_rejects_server_tool_with_side_effects(self) -> None:
@@ -422,11 +783,7 @@ if __name__ == "__main__":
         )
         self.assertEqual(routing_refs["skills"]["rank_tool"], "rank_skills_for_purpose")
         self.assertEqual(routing_refs["skills"]["materialize_tool"], "get_skill")
-        self.assertEqual(routing_refs["workflows"]["summary_tool"], "list_workflows")
-        self.assertEqual(
-            routing_refs["workflows"]["materialize_tool"],
-            "get_document_by_xid",
-        )
+        self.assertNotIn("workflows", routing_refs)
         self.assertNotIn("client_tools", routing_refs)
         obligation_ids = {item["id"] for item in context["client_obligations"]}
         self.assertIn("startup.first_call", obligation_ids)
@@ -492,15 +849,6 @@ if __name__ == "__main__":
         self.assertNotIn("path", uncertainty)
         self.assertEqual(uncertainty["xid"], "8A666C1FD121")
         self.assertEqual(context["missing"], [])
-
-    def test_lists_workflows(self) -> None:
-        catalog = XRefCatalog.build(self.repo)
-
-        workflows = catalog.list_workflows()
-
-        self.assertEqual(workflows[0]["schema_style"], "deterministic_steps")
-        self.assertEqual(workflows[0]["entry"], "draft")
-        self.assertEqual(workflows[0]["capabilities"], ["CAP-SAMPLE-001"])
 
     def test_resolves_any_managed_document_by_xid(self) -> None:
         catalog = XRefCatalog.build(self.repo)
@@ -652,3 +1000,240 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FreshnessTests(unittest.TestCase):
+    """All catalog accessors must reflect the live repository state.
+
+    Regression tests for the frozen build-time snapshot that let
+    expand_knowledge return a stale content_hash next to a live body,
+    breaking the client cache protocol on long-running servers.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp_dir.name)
+        write(
+            self.repo / "knowledge" / "organization" / "rules.md",
+            """<!-- xid: FRESH01 -->
+<a id="xid-FRESH01"></a>
+
+# Original Title
+
+Original summary paragraph.
+""",
+        )
+        write(
+            self.repo / "skills" / "first" / "meta.md",
+            "- skill_id: `first_skill`\n- summary: first skill\n- skill_doc: `./SKILL.md`\n",
+        )
+        write(self.repo / "skills" / "first" / "SKILL.md", "# Skill: first_skill\n")
+        self.catalog = XRefCatalog.build(self.repo)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_expand_knowledge_hash_matches_body_after_edit(self) -> None:
+        write(
+            self.repo / "knowledge" / "organization" / "rules.md",
+            """<!-- xid: FRESH01 -->
+<a id="xid-FRESH01"></a>
+
+# Edited Title
+
+Edited summary paragraph.
+""",
+        )
+
+        expanded = self.catalog.expand_knowledge("FRESH01")
+
+        self.assertEqual(
+            expanded["entry"]["content_hash"],
+            hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(expanded["entry"]["title"], "Edited Title")
+        self.assertIn("Edited summary", expanded["content"])
+
+    def test_knowledge_catalog_reflects_files_added_after_build(self) -> None:
+        write(
+            self.repo / "knowledge" / "organization" / "added.md",
+            "<!-- xid: FRESH02 -->\n\n# Added Later\n\nAdded body.\n",
+        )
+
+        xids = [entry["xid"] for entry in self.catalog.list_knowledge_catalog()]
+
+        self.assertIn("FRESH02", xids)
+        self.assertEqual(
+            self.catalog.expand_knowledge("FRESH02")["entry"]["title"],
+            "Added Later",
+        )
+
+    def test_skill_catalog_reflects_additions_and_removals_after_build(self) -> None:
+        write(
+            self.repo / "skills" / "second" / "meta.md",
+            "- skill_id: `second_skill`\n- summary: second skill\n- skill_doc: `./SKILL.md`\n",
+        )
+        write(self.repo / "skills" / "second" / "SKILL.md", "# Skill: second_skill\n")
+        (self.repo / "skills" / "first" / "meta.md").unlink()
+
+        skill_ids = [entry["skill_id"] for entry in self.catalog.list_skills()]
+
+        self.assertIn("second_skill", skill_ids)
+        self.assertNotIn("first_skill", skill_ids)
+
+    def test_catalog_version_changes_when_content_changes(self) -> None:
+        before = self.catalog.catalog_version
+
+        write(
+            self.repo / "knowledge" / "organization" / "rules.md",
+            "<!-- xid: FRESH01 -->\n\n# Edited Title\n\nEdited.\n",
+        )
+
+        self.assertNotEqual(self.catalog.catalog_version, before)
+
+    def test_build_knowledge_context_bodies_match_their_hashes(self) -> None:
+        write(
+            self.repo / "knowledge" / "organization" / "rules.md",
+            "<!-- xid: FRESH01 -->\n\n# Edited Title\n\nEdited context body.\n",
+        )
+
+        context = self.catalog.build_knowledge_context("edited title", limit=2)
+
+        self.assertTrue(context["entries"])
+        for expanded in context["entries"]:
+            self.assertEqual(
+                expanded["entry"]["content_hash"],
+                hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
+            )
+
+
+class StartupPackDriftTests(unittest.TestCase):
+    """The startup contract pack must report drift against its sources."""
+
+    STARTUP_DOCS = [
+        ("agent/000_agent_entry.md", "0B5C58B5E5B2", "Agent Entry"),
+        ("docs/core/models/017_base_and_xref_layering.md", "5A1C8E4D2F90", "Base Layers"),
+        ("docs/core/contracts/011_startup_xref_routing.md", "6C0B62D6366A", "Startup Routing"),
+        ("docs/core/contracts/016_uncertainty_protocol.md", "8A666C1FD121", "Uncertainty"),
+        ("docs/core/contracts/053_context_direction_security_guard.md", "A7F3C92D4E11", "Guard"),
+        ("docs/core/contracts/015_shared_memory_operations.md", "4A423E72D2ED", "Shared Memory"),
+    ]
+    PACK_DOC_PATH = "docs/core/contracts/079_startup_contract_pack.md"
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp_dir.name)
+        for rel_path, xid, title in self.STARTUP_DOCS:
+            write(
+                self.repo / rel_path,
+                f"<!-- xid: {xid} -->\n<a id=\"xid-{xid}\"></a>\n\n# {title}\n\nBody of {title}.\n",
+            )
+        self.catalog = XRefCatalog.build(self.repo)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _write_pack_doc(self, based_on: dict[str, str]) -> None:
+        hash_lines = "\n".join(f"- {xid}: `{value}`" for xid, value in based_on.items())
+        write(
+            self.repo / self.PACK_DOC_PATH,
+            f"""<!-- xid: D4E8A1C63B57 -->
+<a id="xid-D4E8A1C63B57"></a>
+
+# Startup Contract Pack v1
+
+## Based On
+
+- pack_version: 1
+{hash_lines}
+
+## Global startup invariants
+
+- Pack body authored from the sources above.
+""",
+        )
+
+    def test_missing_pack_doc_falls_back_and_reports_stale(self) -> None:
+        context = self.catalog.get_startup_context()
+        pack = context["startup_contract_pack"]
+
+        self.assertEqual(pack["pack_source"], "embedded_fallback")
+        self.assertIsNone(pack["pack_doc_xid"])
+        self.assertTrue(pack["stale"])
+        self.assertEqual(len(pack["stale_sources"]), 6)
+        self.assertEqual(
+            pack["pack_hash"],
+            hashlib.sha256(pack["body"].encode("utf-8")).hexdigest(),
+        )
+        self.assertTrue(
+            any(
+                "startup_contract_pack is STALE" in instruction
+                for instruction in context["client_instructions"]
+            )
+        )
+
+    def test_repo_pack_doc_with_matching_hashes_is_not_stale(self) -> None:
+        live_hashes = self.catalog.get_startup_context()["startup_contract_pack"][
+            "source_hashes"
+        ]
+        self._write_pack_doc(live_hashes)
+
+        context = self.catalog.get_startup_context()
+        pack = context["startup_contract_pack"]
+
+        self.assertEqual(pack["pack_source"], "repository_document")
+        self.assertEqual(pack["pack_doc_xid"], "D4E8A1C63B57")
+        self.assertFalse(pack["stale"])
+        self.assertEqual(pack["stale_sources"], [])
+        self.assertEqual(pack["pack_version"], 1)
+        self.assertEqual(pack["based_on_hashes"], live_hashes)
+        self.assertIn("Pack body authored from the sources above.", pack["body"])
+        self.assertEqual(
+            pack["pack_hash"],
+            hashlib.sha256(pack["body"].encode("utf-8")).hexdigest(),
+        )
+        self.assertFalse(
+            any(
+                "startup_contract_pack is STALE" in instruction
+                for instruction in context["client_instructions"]
+            )
+        )
+
+    def test_source_edit_after_pack_authoring_flags_exactly_that_source(self) -> None:
+        live_hashes = self.catalog.get_startup_context()["startup_contract_pack"][
+            "source_hashes"
+        ]
+        self._write_pack_doc(live_hashes)
+        rel_path, xid, title = self.STARTUP_DOCS[3]
+        write(
+            self.repo / rel_path,
+            f"<!-- xid: {xid} -->\n<a id=\"xid-{xid}\"></a>\n\n# {title}\n\nRevised body.\n",
+        )
+
+        context = self.catalog.get_startup_context()
+        pack = context["startup_contract_pack"]
+
+        self.assertTrue(pack["stale"])
+        self.assertEqual([item["xid"] for item in pack["stale_sources"]], [xid])
+        self.assertEqual(
+            pack["stale_sources"][0]["based_on_hash"], live_hashes[xid]
+        )
+        self.assertNotEqual(
+            pack["stale_sources"][0]["live_hash"], live_hashes[xid]
+        )
+        self.assertTrue(
+            any(
+                xid in instruction and "STALE" in instruction
+                for instruction in context["client_instructions"]
+            )
+        )
+
+    def test_parse_helpers(self) -> None:
+        from xrefkit_mcp.startup_contract_pack import (
+            parse_based_on_hashes,
+            parse_pack_version,
+        )
+
+        text = "- pack_version: 3\n- 0B5C58B5E5B2: `" + "a" * 64 + "`\n- not a hash line\n"
+        self.assertEqual(parse_pack_version(text), 3)
+        self.assertEqual(parse_based_on_hashes(text), {"0B5C58B5E5B2": "a" * 64})

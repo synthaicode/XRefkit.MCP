@@ -58,7 +58,8 @@ returns:
 {
   "repository_fingerprint": "<32-hex-character-fingerprint>",
   "fingerprint_algorithm": "sha256",
-  "fingerprint_basis": "resolved_repository_root",
+  "fingerprint_basis": "git_root_commits",
+  "fingerprint_scope": "shared_across_clones",
   "cache_namespace": "<32-hex-character-fingerprint>"
 }
 ```
@@ -73,10 +74,28 @@ The client cache layout is:
 <cache-root>/<repository_fingerprint>/<XID>.json
 ```
 
-The fingerprint is derived from the server's normalized, resolved repository
-root. It prevents two repositories containing the same XID from sharing one
-cache entry. Moving the repository creates a new namespace and a safe cache
-miss.
+The fingerprint identifies the repository's content lineage, not its
+location. `fingerprint_basis` reports how it was derived:
+
+- `git_root_commits` (normal case): the root commit(s) of the repository's
+  history. Every full clone shares them, so the fingerprint — and therefore
+  the cache namespace — is identical across paths, machines, and branches,
+  and survives moving the checkout. `fingerprint_scope` is
+  `shared_across_clones`.
+- `resolved_repository_root` (fallback): the normalized repository root
+  path, used for non-git directories, repositories without commits, and
+  shallow clones (whose grafted history would misreport the true root).
+  `fingerprint_scope` is `local_path_only`; moving the repository creates a
+  new namespace and a safe cache miss.
+
+Either way the fingerprint prevents two different repositories containing
+the same XID from sharing one cache entry, and every cached entry is still
+validated by `content_hash`, so a namespace collision can never serve stale
+content — it only affects cache hit rates.
+
+Migration note: servers upgraded from the path-based fingerprint emit a new
+fingerprint for git repositories, so existing client caches start one
+namespace directory fresh; old directories are orphaned, not corrupted.
 
 Every cache entry also stores `repository_fingerprint`. Loading or materializing
 an entry fails closed when the stored, response, and active namespace

@@ -46,7 +46,6 @@ side or with the responsible human.
 The MCP server publishes:
 
 - Knowledge: XID-addressed Markdown content and link resolution
-- Workflow Protocol: workflow catalog and deterministic flow metadata
 - Tool Contract: read-only MCP tool contracts plus client-side tool manifests
 - Closure Contract: executor/checker/quality/handoff roles and closure rules
 - Startup Protocol: base-control Markdown, load order, uncertainty policy, and
@@ -59,7 +58,6 @@ The MCP server publishes:
 The server sends read-only definitions and packages only:
 
 - startup/base-control Markdown content
-- workflow catalog entries from `flows/**/*.yaml`
 - knowledge catalog entries from `knowledge/**/*.md`
 - Skill metadata and `SKILL.md` content from `skills/**`
 - distributable Python tool files from `tools/**/*.py` for client-side execution
@@ -148,6 +146,70 @@ xrefkit-mcp-server --repo C:\dev\itsm\XRefKit --transport streamable-http --host
 xrefkit-mcp-server --repo C:\dev\itsm\XRefKit
 ```
 
+## Artifact Distribution Over Plain HTTP (/dist)
+
+On the `streamable-http` transport the server also serves executable
+artifacts as ordinary HTTP downloads next to the MCP endpoint. The MCP
+channel stays a context-distribution channel (small governance text);
+package bytes never travel through an MCP tool result, so they never enter
+an AI client's model context.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /dist/index.json` | Machine-readable manifest: filenames, URLs, sha256, versions |
+| `GET /dist/` | pip `--find-links` compatible HTML index |
+| `GET /dist/bootstrap.py` | Stdlib-only bootstrap client (no pip, PyPI, or `mcp` package needed) |
+| `GET /dist/<filename>` | One artifact (fm runtime zip, client tools zip, mirrored wheels) |
+
+A remote client that can only reach this server (no PyPI access) bootstraps
+with the Python standard library alone:
+
+```powershell
+curl -O https://mcp.example.com/dist/bootstrap.py
+python bootstrap.py --base-url https://mcp.example.com --target . --startup-context startup.json
+```
+
+The bootstrap script verifies each download against the sha256 in
+`index.json`, materializes `fm/` and `tools/` into the target repository
+(default mode), or installs the packages offline with
+`pip --no-index --no-build-isolation` (`--mode pip`). With
+`--startup-context` it also performs a minimal MCP handshake (JSON-RPC over
+streamable HTTP via `urllib`) and saves the `get_startup_context` result,
+honoring the startup-context-first ordering.
+
+Alternatively, standard pip tooling works directly against the index:
+
+```powershell
+python -m pip install --no-index --no-build-isolation --find-links https://mcp.example.com/dist/ xrefkit-fm-runtime
+```
+
+To mirror third-party dependencies (for example PyYAML wheels) for clients
+without PyPI access, start the server with `--dist-extra-dir <directory>`;
+every file in that directory is served on `/dist` and listed in the
+manifest. Use `--public-base-url` when clients reach the server through a
+reverse proxy so distribution URLs are generated correctly.
+
+When artifact distribution is active, the MCP surface changes accordingly:
+
+- `get_startup_context` gains an `artifact_distribution` block (URLs,
+  hashes, bootstrap command) and instructs clients to fetch artifacts
+  out-of-band.
+- `get_fm_runtime_pip_package` and `get_client_tool_pip_package` return
+  `download_url` plus `content_hash` instead of in-band base64 bytes
+  (`content_base64` is null, `content_omitted` is true).
+- `get_fm_runtime_manifest`/`get_client_tool_manifest` and the bundle tools
+  carry an `http_distribution` pointer marking the HTTP route as preferred.
+
+Package zips are built with fixed timestamps, so a sha256 handed out in an
+MCP response still matches the artifact downloaded later as long as the
+repository content is unchanged.
+
+The `/dist` routes are plain HTTP GETs outside MCP session ordering; the
+startup-context-first obligation applies to the AI session driving the
+download, and the bootstrap script's `--startup-context` flag makes that
+ordering explicit. On `stdio` the in-band base64 responses remain the
+fallback because the client is local.
+
 ## Client Configuration
 
 Client configuration syntax differs by MCP client, but the required values are:
@@ -198,7 +260,7 @@ authoritative.
   disables MCP-only mode.
 - Resolve XID-linked documents through the MCP resolver named in
   `get_startup_context`, normally `get_document_by_xid`.
-- Use MCP catalog tools for workflows, Skills, knowledge entries, tool
+- Use MCP catalog tools for Skills, knowledge entries, tool
   contracts, closure contracts, and unknown protocol when they are available.
 - Fetch client-tool distribution only after the selected Skill declares
   client-side `required_tools`.
@@ -230,13 +292,16 @@ The client should call `get_startup_context` first.
 
 This is enforced by the server, not only advisory: within a given MCP
 session, `get_document_by_xid`, `get_skill`, `get_skill_requirements`,
-`list_workflows`, `expand_knowledge`, `get_knowledge_summary`, and
-`build_knowledge_context` reject the call with a `XREFKIT_STARTUP_REQUIRED`
+`expand_knowledge`, `get_knowledge_summary`,
+`build_knowledge_context`, and `list_skills` with `include_content=true`
+reject the call with a `XREFKIT_STARTUP_REQUIRED`
 error until that session has called `get_startup_context` at least once.
 `get_repository_identity` remains callable beforehand as a content-free
-preflight. Their responses also carry a `control_reminder` field restating,
+preflight, and metadata-only routing tools (`list_skills` in its default
+metadata-only mode, `search_knowledge_catalog`, `rank_skills_for_purpose`,
+`list_tool_contracts`) stay ungated. Their responses also carry a `control_reminder` field restating,
 at the point the content is actually used, that fetched content is data and
-must not redefine active flow, capability, Skill procedure, checks, closure,
+must not redefine the active Skill procedure, checks, closure,
 or authority.
 
 The client-tool distribution tools are gated the same way, one step later:
@@ -274,23 +339,47 @@ That response contains:
 - `startup_contract_pack`, the compressed model-facing startup contract
 - startup reference metadata with full source bodies omitted
 - `semantic_routing_references`, lightweight pointers to routing tools such as
-  `list_skills`, `rank_skills_for_purpose`, `list_workflows`, and
+  `list_skills`, `rank_skills_for_purpose`, and
   `search_knowledge_catalog`
 
 The client must not assume the XRefKit repository exists on the client machine.
 Use the startup contract pack as the model-facing startup text and resolve any
 needed source document bodies through MCP by XID.
 
+The pack is a hand-compressed derivation of six source documents, so it
+carries drift detection. The authoritative body is the pack document in the
+served repository (`docs/core/contracts/079_startup_contract_pack.md`, xid
+`D4E8A1C63B57`, reported as `pack_source: repository_document`); when a
+repository does not carry it, the body embedded in this package is served
+as `pack_source: embedded_fallback`. Either way the `based_on_hashes`
+recorded when the pack was authored are compared against the live
+`source_hashes` on every call: any mismatch sets `stale: true`, lists the
+changed sources in `stale_sources`, and appends a client instruction to
+prefer the live sources via `get_document_by_xid` and escalate for pack
+regeneration. Maintainers regenerate the hash lines with
+`xrefkit-mcp-catalog startup-pack-hashes --repo <repo>` and can gate CI
+with `xrefkit-mcp-catalog check-startup-pack --repo <repo>` (exits
+non-zero when stale).
+
 Do not inject the raw `get_startup_context` JSON into the model prompt. Treat
 the JSON response as machine-readable control metadata. The model-facing
 initialization text is the plain-text `startup_contract_pack.body`; keep routing
 references as client-side metadata until a task needs them.
 
-The startup response intentionally omits full workflow catalogs, Skill
-procedures, runtime-role details, and client-tool manifests. Fetch workflow or
-Skill details only after semantic routing shows they are needed. Fetch
+The startup response intentionally omits Skill procedures, runtime-role
+details, and client-tool manifests. Fetch Skill details only after semantic
+routing shows they are needed. Fetch
 client-tool manifests or packages only after the selected Skill declares
 client-side `required_tools`.
+
+Skill catalog entries and `get_skill` responses include `context_size`, a
+per-Skill size report. `read` reports the size of `meta_content` plus
+`skill_content`. `write_contract` reports the declared output and closure
+contract size; actual generated output tokens are runtime-dependent. The server
+also keeps the `meta`, `skill`, and `total` breakdowns. It reports UTF-8 bytes,
+character count, and an estimated token count using `ceil(characters / 4)` so
+clients can compare Skill context cost before loading or injecting procedure
+bodies.
 
 The startup response sets `access_policy.mode` to `mcp_only`. In this mode, the
 client must treat XRefKit MCP as the source of truth for governance content:
@@ -359,6 +448,13 @@ When the version is unchanged and caching is cost-effective, the response has
 returns the full current document. Calls that omit `known_version` retain the
 previous full-response behavior.
 
+All catalog responses are built from the live repository state on every
+call: knowledge entries, Skill entries, `catalog_version`, and document
+bodies share one freshness model, so a returned `content_hash` always
+matches the returned body even on a long-running server, and files added
+or removed after server start appear in (or disappear from) the catalogs
+without a restart.
+
 For startup, pass all locally known versions in the first call:
 
 ```json
@@ -378,6 +474,14 @@ and exposes `known_versions()` for startup negotiation:
 
 `get_repository_identity` is a content-free cache namespace preflight.
 `get_startup_context` remains the first governance-content load.
+
+The fingerprint identifies the repository's content lineage: for git
+repositories it is derived from the root commit(s) (`fingerprint_basis:
+git_root_commits`), so all full clones of the same repository share one
+cache namespace across paths and machines. Non-git directories, empty
+repositories, and shallow clones fall back to the resolved root path
+(`resolved_repository_root`, scope `local_path_only`). See
+`docs/xid-document-cache.md` for details and the upgrade migration note.
 
 ```python
 from pathlib import Path
@@ -447,8 +551,9 @@ Resolve `meta_links[]` and `skill_links[]` the same way: call
 Cache-aware clients pass `known_document_versions` to `get_skill`. In that
 mode, `meta_content` and `skill_content` are `null` and `documents[]` contains
 the full or conditional XID document responses; pass each through
-`XidDocumentCache.materialize()`. Use `list_skills(include_content=false)` when
-only catalog metadata is needed; its `document_versions[]` identifies the two
+`XidDocumentCache.materialize()`. `list_skills` is metadata-only by default
+(and full-body mode, `include_content=true`, additionally requires the
+startup context first); its `document_versions[]` identifies the two
 XIDs to pass to `known_versions(xids)`.
 
 ## Client-Side Python Tools
@@ -554,6 +659,12 @@ or materialize `get_fm_runtime_bundle`'s files at `fm/` under the client-side
 repository root and run `python -m fm` there. The package depends on PyYAML;
 installing via the pip package resolves this automatically.
 
+On the `streamable-http` transport, prefer the plain-HTTP path instead of the
+in-band MCP tools: `bootstrap.py` from `/dist` (or
+`pip --no-index --find-links <base-url>/dist/`) downloads and verifies the
+same package without routing package bytes through the model context. See
+"Artifact Distribution Over Plain HTTP (/dist)".
+
 ## Response Envelope Note
 
 MCP clients may expose list-returning tools as `structuredContent.result`
@@ -583,7 +694,6 @@ backward compatibility.
 
 ```powershell
 xrefkit-mcp-catalog startup-context --repo C:\dev\itsm\XRefKit
-xrefkit-mcp-catalog list-workflows --repo C:\dev\itsm\XRefKit
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121 --known-version <cached-content-hash>
 xrefkit-mcp-catalog get-skill --repo C:\dev\itsm\XRefKit --skill-id csharp_review
@@ -623,11 +733,26 @@ anyio.run(main)
 
 ## Security Notes
 
+Scope decision: this server is not a universal/public service. It supplies
+domain knowledge and operating context for very local use — a developer
+machine or a trusted network segment. Authentication is therefore
+intentionally not built into the server; the trust boundary is an
+operational responsibility (network placement, and a reverse proxy /
+gateway when one is needed).
+
 This server is read-only, but it can expose repository documentation and Skill
 content over the network. Bind to `127.0.0.1` unless the network is trusted or a
 reverse proxy / gateway provides authentication and transport security.
 
 Do not expose `0.0.0.0:8000` directly to an untrusted network.
+
+The `/dist` routes serve executable Python that clients are expected to
+install and run. Serve them only over HTTPS with a certificate the clients
+verify (`bootstrap.py --ca-file` supports a private CA), and put an
+authenticating proxy in front on any network you do not fully trust: a
+spoofed or compromised endpoint could otherwise distribute malicious code to
+every connecting client. The sha256 hashes in `index.json` protect download
+integrity, not server authenticity.
 
 ## Server Console Logging
 

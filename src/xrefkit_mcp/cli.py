@@ -23,6 +23,18 @@ def main(argv: list[str] | None = None) -> int:
     startup = sub.add_parser("startup-context", help="print required startup references")
     startup.add_argument("--repo", required=True)
 
+    pack_hashes = sub.add_parser(
+        "startup-pack-hashes",
+        help="print the Based On hash lines for the startup contract pack document",
+    )
+    pack_hashes.add_argument("--repo", required=True)
+
+    pack_check = sub.add_parser(
+        "check-startup-pack",
+        help="exit non-zero when the startup contract pack is stale against its sources",
+    )
+    pack_check.add_argument("--repo", required=True)
+
     knowledge = sub.add_parser("search-knowledge", help="search knowledge catalog")
     knowledge.add_argument("--repo", required=True)
     knowledge.add_argument("--query", required=True)
@@ -45,14 +57,15 @@ def main(argv: list[str] | None = None) -> int:
     skills = sub.add_parser("list-skills", help="list Skill catalog")
     skills.add_argument("--repo", required=True)
     skills.add_argument("--limit", type=int)
-    skills.add_argument("--exclude-content", action="store_true")
+    skills.add_argument(
+        "--include-content",
+        action="store_true",
+        help="Include full meta.md and SKILL.md bodies (metadata-only by default)",
+    )
 
     skill = sub.add_parser("get-skill", help="get one Skill catalog entry with transferred content")
     skill.add_argument("--repo", required=True)
     skill.add_argument("--skill-id", required=True)
-
-    workflows = sub.add_parser("list-workflows", help="list workflow catalog")
-    workflows.add_argument("--repo", required=True)
 
     rank = sub.add_parser("rank-skills", help="rank Skill candidates for a purpose")
     rank.add_argument("--repo", required=True)
@@ -98,6 +111,21 @@ def main(argv: list[str] | None = None) -> int:
         payload = model.get_repository_identity()
     elif args.command == "startup-context":
         payload = model.get_startup_context()
+    elif args.command == "startup-pack-hashes":
+        references = model.get_startup_context()["references"]
+        for reference in references:
+            print(f"- {reference['xid']}: `{reference['content_hash']}`")
+        return 0
+    elif args.command == "check-startup-pack":
+        pack = model.get_startup_context()["startup_contract_pack"]
+        payload = {
+            "pack_source": pack["pack_source"],
+            "pack_doc_xid": pack["pack_doc_xid"],
+            "stale": pack["stale"],
+            "stale_sources": pack["stale_sources"],
+        }
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+        return 1 if pack["stale"] else 0
     elif args.command == "search-knowledge":
         payload = model.search_knowledge_catalog(args.query, args.limit)
     elif args.command == "expand-knowledge":
@@ -107,11 +135,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "build-knowledge-context":
         payload = model.build_knowledge_context(args.query, args.limit)
     elif args.command == "list-skills":
-        payload = model.list_skills(args.limit, not args.exclude_content)
+        payload = model.list_skills(args.limit, args.include_content)
     elif args.command == "get-skill":
         payload = model.get_skill(args.skill_id)
-    elif args.command == "list-workflows":
-        payload = model.list_workflows()
     elif args.command == "rank-skills":
         payload = model.rank_skills_for_purpose(args.purpose, args.limit)
     elif args.command == "tool-contracts":

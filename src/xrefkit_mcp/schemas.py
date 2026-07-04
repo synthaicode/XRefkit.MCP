@@ -53,6 +53,7 @@ class KnowledgeCatalogEntry:
     path: str
     expandable: bool = True
     missing: list[str] = field(default_factory=list)
+    zone_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -77,7 +78,6 @@ class SkillCatalogEntry:
     title: str
     summary: str
     maturity: str
-    capabilities: list[str]
     intent: list[str]
     target_artifacts: list[str]
     applies_when: list[str]
@@ -93,7 +93,19 @@ class SkillCatalogEntry:
     skill_links: list[dict[str, str]]
     path: str
     meta_path: str
+    context_size: dict[str, Any]
+    # Skill-centric consolidation (design 083/084): the capability/tuning/
+    # responsibility triad is the Skill meta identity and routing vocabulary,
+    # and preconditions/knowledge_slots are the declared needs that replace
+    # capability_refs binding and static knowledge_refs. Surfaced as an additive
+    # superset; empty until skill metas migrate to the new fields.
+    capability: str = ""
+    tuning: str = ""
+    responsibility: str = ""
+    preconditions: list[str] = field(default_factory=list)
+    knowledge_slots: list[dict[str, Any]] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+    zone_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -145,29 +157,6 @@ class XRefDocument:
     content: str
     links: list[dict[str, str]]
     content_hash: str
-
-    def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data.pop("path", None)
-        return data
-
-
-@dataclass(frozen=True)
-class WorkflowCatalogEntry:
-    flow_id: str
-    name: str
-    doc_xid: str | None
-    phase: str | None
-    owner: str | None
-    path: str
-    schema_style: Literal["deterministic_steps", "legacy_sequence", "unknown"]
-    entry: str | None
-    steps: list[str]
-    sequence: list[str]
-    capabilities: list[str]
-    runs_after: list[str]
-    runs_before: list[str]
-    missing: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -288,6 +277,7 @@ class StartupContext:
     context_injection_policy: dict[str, Any]
     session_context_deduplication: dict[str, Any]
     core_runtime_distribution: dict[str, Any]
+    repository_zones: dict[str, Any]
     client_instructions: list[str]
     client_obligations: list[ClientObligation]
     link_resolution: dict[str, str]
@@ -305,6 +295,7 @@ class StartupContext:
             "context_injection_policy": self.context_injection_policy,
             "session_context_deduplication": self.session_context_deduplication,
             "core_runtime_distribution": self.core_runtime_distribution,
+            "repository_zones": self.repository_zones,
             "client_instructions": self.client_instructions,
             "client_obligations": [
                 obligation.to_dict() for obligation in self.client_obligations
