@@ -1033,6 +1033,7 @@ def _build_skill_entry(root: Path, ownership: Ownership | None, meta_path: Path)
     skill_text = read_text(skill_doc) if skill_doc.exists() else ""
     missing = _missing_skill_fields(meta, skill_doc.exists())
     knowledge_refs = scalar_list(meta, "knowledge_refs")
+    knowledge_slots = _parse_knowledge_slots(meta)
     closure = ClosureContract(
         closure_conditions=scalar_list(meta, "closure")
         or _section_bullets(skill_text, "Closure"),
@@ -1054,7 +1055,10 @@ def _build_skill_entry(root: Path, ownership: Ownership | None, meta_path: Path)
         or scalar_list(meta, "use_when"),
         not_for=scalar_list(meta, "not_for")
         or _split_constraints(str(meta.get("constraints") or "")),
-        required_knowledge=[_knowledge_req(item) for item in knowledge_refs],
+        required_knowledge=(
+            [_knowledge_req(item) for item in knowledge_refs]
+            + [_bind_knowledge_req(slot) for slot in knowledge_slots if slot.get("bind")]
+        ),
         required_tools=[_required_tool(item) for item in scalar_list(meta, "required_tools")],
         inputs=scalar_list(meta, "input"),
         outputs=scalar_list(meta, "output"),
@@ -1080,7 +1084,7 @@ def _build_skill_entry(root: Path, ownership: Ownership | None, meta_path: Path)
         tuning=str(meta.get("tuning") or ""),
         responsibility=str(meta.get("responsibility") or ""),
         preconditions=scalar_list(meta, "preconditions"),
-        knowledge_slots=_parse_knowledge_slots(meta),
+        knowledge_slots=knowledge_slots,
         missing=missing,
         zone_metadata=_zone_metadata(ownership, rel_meta),
     )
@@ -1956,7 +1960,6 @@ def _missing_skill_fields(meta: dict[str, object], has_skill_doc: bool) -> list[
         "skill_id",
         "summary",
         "maturity",
-        "knowledge_refs",
         "input",
         "output",
     ]
@@ -2018,6 +2021,17 @@ def _knowledge_req(ref: str) -> dict[str, object]:
         "xid": xid_match.group(1) if xid_match else ref,
         "version": 1,
         "required_when": "declared by Skill meta knowledge_refs",
+        "detail_policy": "expand_on_demand",
+    }
+
+
+def _bind_knowledge_req(slot: dict) -> dict[str, object]:
+    # A pinned (bind) knowledge_slot is a required-knowledge XID; query slots are
+    # resolved dynamically via resolve_skill_knowledge instead.
+    return {
+        "xid": str(slot.get("bind")),
+        "version": 1,
+        "required_when": "declared by Skill meta knowledge_slot bind",
         "detail_policy": "expand_on_demand",
     }
 
