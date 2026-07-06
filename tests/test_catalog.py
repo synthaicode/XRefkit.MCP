@@ -1032,6 +1032,22 @@ Duplicate external body.
         self.assertNotIn("version", document)
         self.assertIs(document["cache_policy"]["cache_recommended"], True)
 
+    def test_resolves_xid_bearing_yaml_document_by_xid(self) -> None:
+        write(
+            self.repo / "skills" / "sample" / "references" / "flow_template.yaml",
+            """# xid: YAMLXID123
+
+flow_id: sample
+""",
+        )
+        catalog = XRefCatalog.build(self.repo)
+
+        document = catalog.get_document_by_xid("YAMLXID123")
+
+        self.assertEqual(document["xid"], "YAMLXID123")
+        self.assertNotIn("path", document)
+        self.assertIn("flow_id: sample", document["content"])
+
     def test_conditional_document_resolution_omits_unchanged_content(self) -> None:
         catalog = XRefCatalog.build(self.repo)
         document = catalog.get_document_by_xid("8A666C1FD121")

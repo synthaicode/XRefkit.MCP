@@ -58,6 +58,7 @@ CLIENT_TOOL_PACKAGE_VERSION = "0.1.0"
 FM_RUNTIME_PACKAGE_ID = "xrefkit-fm-runtime"
 FM_RUNTIME_VERSION_RE = re.compile(r"__version__\s*=\s*[\"']([^\"']+)[\"']")
 CACHE_MAX_VERSION_PAYLOAD_RATIO = 0.5
+XID_DOCUMENT_SUFFIXES = {".md", ".yaml", ".yml"}
 STARTUP_REFERENCE_DEFINITIONS = [
     (
         "0B5C58B5E5B2",
@@ -373,6 +374,7 @@ class XRefCatalog:
         entry = self._skill_by_id(skill_id)
         result = entry.to_dict()
         result["client_tool_download"] = _client_tool_download_policy(entry)
+        result["content_resolution"] = _mcp_content_resolution_policy()
         if known_document_versions is None:
             return result
 
@@ -400,6 +402,7 @@ class XRefCatalog:
             "required_knowledge": entry.required_knowledge,
             "required_tools": entry.required_tools,
             "client_tool_download": _client_tool_download_policy(entry),
+            "content_resolution": _mcp_content_resolution_policy(),
             "closure_contract": entry.closure_contract.to_dict(),
             "meta_path": entry.meta_path,
             "meta_content": entry.meta_content,
@@ -773,6 +776,7 @@ class XRefCatalog:
                     "Do not read XRefKit governance Markdown directly from the client filesystem when this MCP server is configured.",
                     "Do not resolve transferred Markdown links by filesystem path.",
                     "Do not open local Skill files to bypass get_skill.",
+                    "Do not interpret path-like response fields such as meta_path, skill_doc, path, or path#xid text as client filesystem fetch instructions.",
                     "Do not treat a local checkout as authoritative unless the user explicitly disables MCP-only mode.",
                 ],
                 "required_tools": {
@@ -795,6 +799,8 @@ class XRefCatalog:
                 "resolver_argument": "xid",
                 "version_field": "content_hash",
                 "conditional_argument": "known_version",
+                "path_handling": "server_side_identity_or_diagnostic_only",
+                "client_filesystem_resolution": "forbidden",
                 "example_call": "get_document_by_xid({\"xid\": \"8A666C1FD121\"})",
             },
             load_order=[reference.xid for reference in references],
@@ -839,6 +845,7 @@ def _client_instructions() -> list[str]:
         "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
         "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
         "Do not assume referenced Markdown files exist on the client filesystem.",
+        "Treat path-like metadata such as meta_path, skill_doc, path, or path#xid text as server-side identity or diagnostic metadata only; do not open it through the client filesystem for governance content.",
         "Do not automatically load all links from startup references; use links only when the current task actually needs them.",
         "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
         "Use the returned document content as the authoritative text for that XID.",
@@ -992,13 +999,21 @@ def _managed_markdown_files(root: Path, ownership: Ownership | None = None) -> l
     for dirname in ["agent", "docs", "knowledge", "skills"]:
         base = root / dirname
         if base.exists():
-            files.extend(path for path in sorted(base.glob("**/*.md")) if _catalog_enabled(root, ownership, path))
+            files.extend(
+                path
+                for path in sorted(base.glob("**/*"))
+                if path.is_file()
+                and path.suffix.lower() in XID_DOCUMENT_SUFFIXES
+                and _catalog_enabled(root, ownership, path)
+            )
     packs_root = root / "packs"
     if ownership is not None and packs_root.exists():
         files.extend(
             path
-            for path in sorted(packs_root.glob("*/**/*.md"))
-            if _catalog_enabled(root, ownership, path)
+            for path in sorted(packs_root.glob("*/**/*"))
+            if path.is_file()
+            and path.suffix.lower() in XID_DOCUMENT_SUFFIXES
+            and _catalog_enabled(root, ownership, path)
         )
     return files
 
@@ -2533,6 +2548,16 @@ def _skill_values_by_category(skill: SkillCatalogEntry) -> dict[str, list[str]]:
             *tool_values,
             *knowledge_slot_values,
         ],
+    }
+
+
+def _mcp_content_resolution_policy() -> dict[str, str]:
+    return {
+        "mode": "mcp_only",
+        "xid_document_tool": "get_document_by_xid",
+        "skill_body_tool": "get_skill",
+        "path_like_fields": "server_side_identity_or_diagnostic_only",
+        "client_filesystem_resolution": "forbidden",
     }
 
 
