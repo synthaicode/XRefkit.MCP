@@ -1,5 +1,26 @@
 # XRefKit MCP
 
+> [!IMPORTANT]
+> **This implementation has moved to the main
+> [XRefKit repository](https://github.com/synthaicode/XRefKit).**
+>
+> As of 2026-07-10, the MCP server, resolver, packaged runtime assets, client
+> tool distribution, and tests are maintained under `xrefkit/mcp/` as part of
+> the unified `xrefkit` Python package. This repository is retained as a
+> historical reference and is no longer the authoritative implementation.
+>
+> Install the main repository with its MCP dependencies and start the integrated
+> server with:
+>
+> ```powershell
+> python -m pip install -e ".[mcp]"
+> xrefkit mcp serve --repo . --transport stdio
+> ```
+>
+> The `xrefkit-mcp-server`, `xrefkit_mcp`, `fm`, and `get_fm_runtime_*`
+> instructions below describe the pre-migration implementation and must not be
+> used as current setup guidance.
+
 ![Traditional MCP executes on the server; XRefKit MCP distributes protocol, knowledge, and contracts for client-side execution.](docs/assets/xrefkit-mcp-comparison.png)
 
 Traditional MCP transports execution. XRefKit MCP transports operational context.
