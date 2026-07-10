@@ -116,7 +116,10 @@ class SkillCatalogEntry:
 @dataclass(frozen=True)
 class SkillRankResult:
     skill_id: str
+    summary: str
+    maturity: str
     matched_facets: list[str]
+    matched_categories: dict[str, list[str]]
     closure_preview: ClosureContract
     required_knowledge: list[dict[str, Any]]
     execution_readiness: dict[str, Any]

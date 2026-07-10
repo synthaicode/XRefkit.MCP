@@ -418,6 +418,65 @@ Duplicate body.
         self.assertEqual(expanded["entry"]["title"], "Context Rules")
         self.assertIn("external input", expanded["content"])
 
+    def test_external_domain_knowledge_root_is_available_by_xid_without_path_leak(self) -> None:
+        external_root = self.repo.parent / "domain-store"
+        write(
+            external_root / "billing" / "api-naming.md",
+            """<!-- xid: EXTDOMAIN01 -->
+<a id="xid-EXTDOMAIN01"></a>
+
+# Billing API Naming
+
+Use invoice command names for billing operations.
+""",
+        )
+        catalog = XRefCatalog.build(self.repo, [external_root])
+
+        listed = catalog.list_knowledge_catalog()
+        external_entry = next(entry for entry in listed if entry["xid"] == "EXTDOMAIN01")
+        expanded = catalog.expand_knowledge("EXTDOMAIN01")
+        document = catalog.get_document_by_xid("EXTDOMAIN01")
+
+        self.assertEqual(external_entry["domain"], "billing")
+        self.assertEqual(external_entry["zone_metadata"]["zone"], "external_domain_knowledge")
+        self.assertNotIn("path", external_entry)
+        self.assertNotIn(str(external_root), repr(listed))
+        self.assertIn("invoice command names", expanded["content"])
+        self.assertNotIn("path", expanded["entry"])
+        self.assertNotIn(str(external_root), repr(expanded))
+        self.assertIn("# Billing API Naming", document["content"])
+        self.assertNotIn("path", document)
+        self.assertNotIn(str(external_root), repr(document))
+
+    def test_external_domain_knowledge_xid_conflict_fails_closed_without_external_path(self) -> None:
+        external_root = self.repo.parent / "domain-store"
+        write(
+            external_root / "duplicate.md",
+            """<!-- xid: ABC123 -->
+<a id="xid-ABC123"></a>
+
+# External Duplicate
+
+Duplicate external body.
+""",
+        )
+        catalog = XRefCatalog.build(self.repo, [external_root])
+
+        result = catalog.get_document_by_xid("ABC123")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("xid_conflict", result["error"])
+        self.assertEqual(2, len(result["matches"]))
+        self.assertEqual(
+            ["external_domain_knowledge", "repository"],
+            sorted(match["source"] for match in result["matches"]),
+        )
+        external_match = next(
+            match for match in result["matches"] if match["source"] == "external_domain_knowledge"
+        )
+        self.assertNotIn("path", external_match)
+        self.assertNotIn(str(external_root), repr(result))
+
     def test_ranks_skills_without_selecting_one(self) -> None:
         catalog = XRefCatalog.build(self.repo)
 
@@ -643,6 +702,117 @@ Duplicate body.
             entry["execution_readiness"]["declared_preconditions"],
         )
 
+    def test_rank_skills_uses_categories_for_japanese_test_planning(self) -> None:
+        write(
+            self.repo / "skills" / "test_flow" / "meta.md",
+            """<!-- xid: TESTFLOWMETA -->
+# Skill Meta: test_flow
+
+- skill_id: `test_flow`
+- summary: execute test-planning, test-item structuring, integration/regression test design, and manufacturing-side test-method review
+- use_when: user needs a reviewed test package from planning outputs, requirements, and design evidence
+- input: approved requirements, work plan, test policy, test tool policy
+- output: test plan with selected test tool basis, test execution preparation plan, local-domain test execution helper script plan, test design
+- maturity: `draft`
+- capability: test planning
+- tuning: test execution preparation and helper scripts
+- responsibility: prepare test plans with test data, tools, scripts, and traceability
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "test_flow" / "SKILL.md",
+            "<!-- xid: TESTFLOWDOC -->\n# Skill: test_flow\n",
+        )
+        write(
+            self.repo / "skills" / "implementation_flow" / "meta.md",
+            """<!-- xid: IMPLMETA -->
+# Skill Meta: implementation_flow
+
+- skill_id: `implementation_flow`
+- summary: implement code and scripts after design approval
+- use_when: user needs implementation
+- input: approved design
+- output: source changes
+- maturity: `trial`
+- capability: implementation
+- tuning: code and script implementation
+- responsibility: implement approved changes
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "implementation_flow" / "SKILL.md",
+            "<!-- xid: IMPLDOC -->\n# Skill: implementation_flow\n",
+        )
+        write(
+            self.repo / "skills" / "db_design" / "meta.md",
+            """<!-- xid: DBDESIGNMETA -->
+# Skill Meta: db_design
+
+- skill_id: `db_design`
+- summary: design database schema, stored procedures, and SQL helper scripts
+- use_when: user needs database design or SQL implementation planning
+- input: database requirements, table rules, stored procedure rules
+- output: database design, SQL script preparation, database helper tooling
+- maturity: `draft`
+- capability: database design
+- tuning: SQL scripts and database tool preparation
+- responsibility: prepare database implementation rules
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "db_design" / "SKILL.md",
+            "<!-- xid: DBDESIGNDOC -->\n# Skill: db_design\n",
+        )
+        write(
+            self.repo / "skills" / "test_tool_catalog_preparation" / "meta.md",
+            """<!-- xid: TESTTOOLCATALOGMETA -->
+# Skill Meta: test_tool_catalog_preparation
+
+- skill_id: `test_tool_catalog_preparation`
+- summary: prepare a domain/environment test-tool catalog as reusable domain knowledge for test planning and test design
+- use_when: user needs to catalog test tools before test planning
+- input: target domain, test environment, existing test tool information
+- output: test tool catalog domain knowledge
+- maturity: `draft`
+- capability: test tool cataloging
+- tuning: domain test-tool catalog preparation
+- responsibility: catalog test tools for test planning
+- skill_doc: `./SKILL.md`
+""",
+        )
+        write(
+            self.repo / "skills" / "test_tool_catalog_preparation" / "SKILL.md",
+            "<!-- xid: TESTTOOLCATALOGDOC -->\n# Skill: test_tool_catalog_preparation\n",
+        )
+
+        catalog = XRefCatalog.build(self.repo)
+        ranked = catalog.rank_skills_for_purpose(
+            "テスト用スクリプトを用意し、テストの実行を簡易にする",
+            limit=5,
+        )
+        by_skill_id = {entry["skill_id"]: entry for entry in ranked}
+
+        self.assertEqual(ranked[0]["skill_id"], "test_flow")
+        self.assertIn("summary", ranked[0])
+        self.assertIn("matched_categories", ranked[0])
+        self.assertIn("activity", ranked[0]["matched_categories"])
+        self.assertIn("artifact", ranked[0]["matched_categories"])
+        self.assertIn("domain", ranked[0]["matched_categories"])
+        self.assertIn("tool_runtime", ranked[0]["matched_categories"])
+        self.assertGreater(by_skill_id["test_flow"]["score"], by_skill_id["db_design"]["score"])
+
+        catalog_ranked = catalog.rank_skills_for_purpose(
+            "試験ツールをカタログ化して試験計画で使う",
+            limit=5,
+        )
+        self.assertEqual(
+            catalog_ranked[0]["skill_id"],
+            "test_tool_catalog_preparation",
+        )
+
     def test_rejects_server_tool_with_side_effects(self) -> None:
         contract = ToolContract(
             tool_id="bad.write",
@@ -861,6 +1031,22 @@ Duplicate body.
         self.assertNotIn(".md#xid-", document["content"])
         self.assertNotIn("version", document)
         self.assertIs(document["cache_policy"]["cache_recommended"], True)
+
+    def test_resolves_xid_bearing_yaml_document_by_xid(self) -> None:
+        write(
+            self.repo / "skills" / "sample" / "references" / "flow_template.yaml",
+            """# xid: YAMLXID123
+
+flow_id: sample
+""",
+        )
+        catalog = XRefCatalog.build(self.repo)
+
+        document = catalog.get_document_by_xid("YAMLXID123")
+
+        self.assertEqual(document["xid"], "YAMLXID123")
+        self.assertNotIn("path", document)
+        self.assertIn("flow_id: sample", document["content"])
 
     def test_conditional_document_resolution_omits_unchanged_content(self) -> None:
         catalog = XRefCatalog.build(self.repo)
@@ -1090,6 +1276,23 @@ Edited summary paragraph.
         )
 
         self.assertNotEqual(self.catalog.catalog_version, before)
+
+    def test_catalog_version_changes_when_external_domain_knowledge_changes(self) -> None:
+        external_root = self.repo.parent / "domain-store"
+        external_file = external_root / "billing.md"
+        write(
+            external_file,
+            "<!-- xid: EXTFRESH01 -->\n\n# External Original\n\nOriginal.\n",
+        )
+        catalog = XRefCatalog.build(self.repo, [external_root])
+        before = catalog.catalog_version
+
+        write(
+            external_file,
+            "<!-- xid: EXTFRESH01 -->\n\n# External Edited\n\nEdited.\n",
+        )
+
+        self.assertNotEqual(catalog.catalog_version, before)
 
     def test_build_knowledge_context_bodies_match_their_hashes(self) -> None:
         write(

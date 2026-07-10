@@ -129,6 +129,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory of additional artifacts (for example PyYAML wheels) "
         "to mirror on the /dist routes for clients without PyPI access.",
     )
+    parser.add_argument(
+        "--domain-knowledge-root",
+        action="append",
+        default=[],
+        help="External XID-addressable domain knowledge root. Can be repeated.",
+    )
     args = parser.parse_args(argv)
     try:
         _validate_tls_configuration(
@@ -139,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    catalog = XRefCatalog.build(Path(args.repo))
+    catalog = XRefCatalog.build(Path(args.repo), args.domain_knowledge_root)
 
     # Artifact distribution runs only on the network transport: executable
     # artifacts are served as plain HTTP downloads next to the MCP endpoint

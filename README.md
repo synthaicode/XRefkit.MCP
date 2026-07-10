@@ -1,5 +1,26 @@
 # XRefKit MCP
 
+> [!IMPORTANT]
+> **This implementation has moved to the main
+> [XRefKit repository](https://github.com/synthaicode/XRefKit).**
+>
+> As of 2026-07-10, the MCP server, resolver, packaged runtime assets, client
+> tool distribution, and tests are maintained under `xrefkit/mcp/` as part of
+> the unified `xrefkit` Python package. This repository is retained as a
+> historical reference and is no longer the authoritative implementation.
+>
+> Install the main repository with its MCP dependencies and start the integrated
+> server with:
+>
+> ```powershell
+> python -m pip install -e ".[mcp]"
+> xrefkit mcp serve --repo . --transport stdio
+> ```
+>
+> The `xrefkit-mcp-server`, `xrefkit_mcp`, `fm`, and `get_fm_runtime_*`
+> instructions below describe the pre-migration implementation and must not be
+> used as current setup guidance.
+
 ![Traditional MCP executes on the server; XRefKit MCP distributes protocol, knowledge, and contracts for client-side execution.](docs/assets/xrefkit-mcp-comparison.png)
 
 Traditional MCP transports execution. XRefKit MCP transports operational context.
@@ -58,7 +79,8 @@ The MCP server publishes:
 The server sends read-only definitions and packages only:
 
 - startup/base-control Markdown content
-- knowledge catalog entries from `knowledge/**/*.md`
+- knowledge catalog entries from `knowledge/**/*.md` and configured external
+  XID-addressable domain knowledge roots
 - Skill metadata and `SKILL.md` content from `skills/**`
 - distributable Python tool files from `tools/**/*.py` for client-side execution
 - the `fm/**/*.py` Skill-execution runtime for client-side execution
@@ -118,7 +140,8 @@ xrefkit-mcp-server `
   --repo C:\dev\itsm\XRefKit `
   --transport streamable-http `
   --host 0.0.0.0 `
-  --port 8000
+  --port 8000 `
+  --domain-knowledge-root C:\dev\domain-knowledge\billing
 ```
 
 The client URL is:
@@ -694,6 +717,7 @@ backward compatibility.
 
 ```powershell
 xrefkit-mcp-catalog startup-context --repo C:\dev\itsm\XRefKit
+xrefkit-mcp-catalog search-knowledge --repo C:\dev\itsm\XRefKit --domain-knowledge-root C:\dev\domain-knowledge\billing --query "billing API naming"
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121
 xrefkit-mcp-catalog get-document --repo C:\dev\itsm\XRefKit --xid 8A666C1FD121 --known-version <cached-content-hash>
 xrefkit-mcp-catalog get-skill --repo C:\dev\itsm\XRefKit --skill-id csharp_review

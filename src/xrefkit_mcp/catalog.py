@@ -58,6 +58,7 @@ CLIENT_TOOL_PACKAGE_VERSION = "0.1.0"
 FM_RUNTIME_PACKAGE_ID = "xrefkit-fm-runtime"
 FM_RUNTIME_VERSION_RE = re.compile(r"__version__\s*=\s*[\"']([^\"']+)[\"']")
 CACHE_MAX_VERSION_PAYLOAD_RATIO = 0.5
+XID_DOCUMENT_SUFFIXES = {".md", ".yaml", ".yml"}
 STARTUP_REFERENCE_DEFINITIONS = [
     (
         "0B5C58B5E5B2",
@@ -105,6 +106,110 @@ STOP_TOKENS = {
     "with",
 }
 
+ROUTING_SYNONYMS = {
+    "試験計画": ("test", "planning", "plan", "test_flow"),
+    "テスト計画": ("test", "planning", "plan", "test_flow"),
+    "試験設計": ("test", "design", "test_flow"),
+    "テスト設計": ("test", "design", "test_flow"),
+    "試験項目": ("test", "item", "case"),
+    "テスト項目": ("test", "item", "case"),
+    "試験データ": ("test", "data"),
+    "テストデータ": ("test", "data"),
+    "試験環境": ("test", "environment"),
+    "テスト環境": ("test", "environment"),
+    "試験ツール": ("test", "tool"),
+    "テストツール": ("test", "tool"),
+    "テスト用ツール": ("test", "tool", "local", "domain"),
+    "試験用ツール": ("test", "tool", "local", "domain"),
+    "テスト用スクリプト": ("test", "script", "helper", "automation", "test_flow"),
+    "試験用スクリプト": ("test", "script", "helper", "automation", "test_flow"),
+    "スクリプト": ("script", "helper", "automation"),
+    "カタログ化": ("catalog", "cataloging", "test_tool_catalog_preparation"),
+    "カタログ": ("catalog", "test_tool_catalog_preparation"),
+    "用意": ("preparation", "setup"),
+    "準備": ("preparation", "setup", "implementation"),
+    "実施前": ("pre", "execution", "preparation"),
+    "実行前": ("pre", "execution", "preparation"),
+    "実行": ("execution", "run"),
+    "簡易": ("simplify", "helper", "script"),
+    "簡易化": ("simplify", "helper", "script"),
+    "証跡": ("evidence", "capture"),
+    "根拠": ("basis", "evidence"),
+    "トレーサビリティ": ("traceability", "xddp"),
+}
+
+ROUTING_CATEGORY_TERMS = {
+    "activity": {
+        "analysis",
+        "catalog",
+        "cataloging",
+        "design",
+        "implementation",
+        "execution",
+        "planning",
+        "preparation",
+        "review",
+        "run",
+        "simplify",
+    },
+    "artifact": {
+        "case",
+        "catalog",
+        "data",
+        "environment",
+        "helper",
+        "item",
+        "plan",
+        "script",
+        "test",
+        "tool",
+    },
+    "domain": {
+        "c#",
+        "csharp",
+        "database",
+        "db",
+        "dotnet",
+        "release",
+        "security",
+        "test",
+    },
+    "phase": {
+        "before",
+        "execution",
+        "implementation",
+        "pre",
+        "preparation",
+        "release",
+        "setup",
+    },
+    "evidence_trace": {
+        "basis",
+        "evidence",
+        "trace",
+        "traceability",
+        "xddp",
+    },
+    "tool_runtime": {
+        "automation",
+        "ci",
+        "fm",
+        "helper",
+        "mcp",
+        "script",
+        "tool",
+    },
+}
+
+ROUTING_CATEGORY_WEIGHTS = {
+    "activity": 0.5,
+    "artifact": 0.7,
+    "domain": 0.3,
+    "phase": 0.3,
+    "evidence_trace": 0.25,
+    "tool_runtime": 0.25,
+}
+
 
 @dataclass(frozen=True)
 class XRefCatalog:
@@ -113,12 +218,20 @@ class XRefCatalog:
     fingerprint_basis: str
     tools: list[ToolContract]
     ownership: Ownership | None = None
+    domain_knowledge_roots: tuple[Path, ...] = ()
 
     @classmethod
-    def build(cls, repo_root: str | Path) -> "XRefCatalog":
+    def build(
+        cls,
+        repo_root: str | Path,
+        domain_knowledge_roots: list[str | Path] | tuple[str | Path, ...] | None = None,
+    ) -> "XRefCatalog":
         root = Path(repo_root).resolve()
         if not root.exists():
             raise FileNotFoundError(root)
+        external_roots = tuple(
+            _resolve_domain_knowledge_root(path) for path in (domain_knowledge_roots or [])
+        )
         fingerprint, fingerprint_basis = repository_identity(root)
         ownership = load_ownership(root)
         if ownership is not None:
@@ -131,6 +244,7 @@ class XRefCatalog:
             fingerprint_basis=fingerprint_basis,
             tools=builtin_tool_contracts(),
             ownership=ownership,
+            domain_knowledge_roots=external_roots,
         )
 
     # knowledge, skills, and catalog_version are rebuilt from the live
@@ -165,6 +279,12 @@ class XRefCatalog:
         for path in _content_files(self.repo_root, self.ownership, "knowledge", "*.md"):
             text = read_text(path)
             entries.append((_knowledge_entry(self.repo_root, self.ownership, path, text), text))
+        for root in self.domain_knowledge_roots:
+            for path in _external_knowledge_files(root):
+                text = read_text(path)
+                if not first_xid(text):
+                    continue
+                entries.append((_external_knowledge_entry(root, path, text), text))
         return entries
 
     def get_repository_identity(self) -> dict[str, str]:
@@ -254,6 +374,7 @@ class XRefCatalog:
         entry = self._skill_by_id(skill_id)
         result = entry.to_dict()
         result["client_tool_download"] = _client_tool_download_policy(entry)
+        result["content_resolution"] = _mcp_content_resolution_policy()
         if known_document_versions is None:
             return result
 
@@ -281,6 +402,7 @@ class XRefCatalog:
             "required_knowledge": entry.required_knowledge,
             "required_tools": entry.required_tools,
             "client_tool_download": _client_tool_download_policy(entry),
+            "content_resolution": _mcp_content_resolution_policy(),
             "closure_contract": entry.closure_contract.to_dict(),
             "meta_path": entry.meta_path,
             "meta_content": entry.meta_content,
@@ -347,6 +469,7 @@ class XRefCatalog:
 
     def rank_skills_for_purpose(self, purpose: str, limit: int = 5) -> list[dict]:
         query_tokens = _tokens(purpose)
+        query_categories = _routing_categories(query_tokens)
         results: list[SkillRankResult] = []
         available_tools = {tool.tool_id: tool.version for tool in self.tools}
         for skill in self.skills:
@@ -359,6 +482,12 @@ class XRefCatalog:
                 ("applies_when", skill.applies_when, 0.2),
                 ("summary", [skill.summary], 0.2),
                 ("inputs", skill.inputs, 0.1),
+                ("outputs", skill.outputs, 0.15),
+                (
+                    "knowledge_slots",
+                    [_knowledge_slot_text(slot) for slot in skill.knowledge_slots],
+                    0.1,
+                ),
                 # Skill-centric consolidation (084 M4): the triad is the routing
                 # vocabulary. Empty for un-migrated skills, so this is additive.
                 ("capability", [skill.capability], 0.2),
@@ -370,10 +499,26 @@ class XRefCatalog:
                     facets.extend(f"{label}={value}" for value in matched[:3])
                     score += weight
                     score += min(0.1, 0.02 * _overlap_count(query_tokens, matched))
+            matched_categories = _matched_routing_categories(skill, query_categories)
+            for category, matches in matched_categories.items():
+                category_weight = ROUTING_CATEGORY_WEIGHTS.get(category, 0.0)
+                score += category_weight
+                score += min(0.15, 0.03 * len(matches))
+                facets.extend(f"{category}={value}" for value in matches[:3])
+            if skill.skill_id in query_tokens:
+                score += 0.6
+                facets.append(f"skill_id_alias={skill.skill_id}")
+            if (
+                "activity" in matched_categories
+                and "artifact" in matched_categories
+                and _has_required_category_coverage(query_categories, matched_categories)
+            ):
+                score += 1.0
             blocked = _matched_values(query_tokens, skill.not_for, use_stop_words=True)
             if blocked:
                 facets.extend(f"not_for={value}" for value in blocked[:3])
-                score *= 0.25
+                score *= 0.75
+            score *= _category_coverage_multiplier(query_categories, matched_categories)
             if "roslyn" in query_tokens and "roslyn" in _tokens(
                 " ".join([skill.skill_id, skill.summary, *skill.applies_when])
             ):
@@ -392,10 +537,15 @@ class XRefCatalog:
                 "missing_tool_contracts": missing_tools,
                 "declared_preconditions": skill.preconditions,
             }
+            if score <= 0:
+                continue
             results.append(
                 SkillRankResult(
                     skill_id=skill.skill_id,
+                    summary=skill.summary,
+                    maturity=skill.maturity,
                     matched_facets=facets,
+                    matched_categories=matched_categories,
                     closure_preview=skill.closure_contract,
                     required_knowledge=skill.required_knowledge,
                     execution_readiness=readiness,
@@ -521,6 +671,7 @@ class XRefCatalog:
         known_version: str | None = None,
     ) -> dict:
         matches = _managed_markdown_matches_by_xid(self.repo_root, self.ownership, xid)
+        matches.extend(_external_markdown_matches_by_xid(self.domain_knowledge_roots, xid))
         if len(matches) > 1:
             return {
                 "ok": False,
@@ -528,18 +679,14 @@ class XRefCatalog:
                 "xid": xid,
                 "message": "multiple catalog-visible documents declare this XID; refusing path-order selection",
                 "matches": [
-                    {
-                        "path": relative_to_repo(path, self.repo_root),
-                        "content_hash": _xref_document(path, self.repo_root, text).content_hash,
-                        "zone_metadata": _zone_metadata(self.ownership, relative_to_repo(path, self.repo_root)),
-                    }
+                    _document_conflict_match(self.repo_root, self.ownership, path, text)
                     for path, text in matches
                 ],
             }
         if len(matches) == 1:
             path, text = matches[0]
             return _conditional_document_response(
-                _xref_document(path, self.repo_root, text),
+                _xref_document_for_catalog(self.repo_root, self.domain_knowledge_roots, path, text),
                 known_version,
                 self.repository_fingerprint,
             )
@@ -629,6 +776,7 @@ class XRefCatalog:
                     "Do not read XRefKit governance Markdown directly from the client filesystem when this MCP server is configured.",
                     "Do not resolve transferred Markdown links by filesystem path.",
                     "Do not open local Skill files to bypass get_skill.",
+                    "Do not interpret path-like response fields such as meta_path, skill_doc, path, or path#xid text as client filesystem fetch instructions.",
                     "Do not treat a local checkout as authoritative unless the user explicitly disables MCP-only mode.",
                 ],
                 "required_tools": {
@@ -651,6 +799,8 @@ class XRefCatalog:
                 "resolver_argument": "xid",
                 "version_field": "content_hash",
                 "conditional_argument": "known_version",
+                "path_handling": "server_side_identity_or_diagnostic_only",
+                "client_filesystem_resolution": "forbidden",
                 "example_call": "get_document_by_xid({\"xid\": \"8A666C1FD121\"})",
             },
             load_order=[reference.xid for reference in references],
@@ -661,9 +811,17 @@ class XRefCatalog:
         ).to_dict()
 
     def _knowledge_by_xid(self, xid: str) -> tuple[KnowledgeCatalogEntry, str]:
+        matches: list[tuple[KnowledgeCatalogEntry, str]] = []
         for entry, text in self._scan_knowledge():
             if entry.xid == xid:
-                return entry, text
+                matches.append((entry, text))
+        if len(matches) > 1:
+            raise ValueError(
+                "knowledge xid conflict: "
+                f"{xid} appears in multiple catalog-visible knowledge entries"
+            )
+        if len(matches) == 1:
+            return matches[0]
         raise KeyError(f"knowledge xid not found: {xid}")
 
     def _skill_by_id(self, skill_id: str) -> SkillCatalogEntry:
@@ -687,6 +845,7 @@ def _client_instructions() -> list[str]:
         "MCP-only mode is active: treat this MCP response as the source of truth for XRefKit governance content.",
         "Do not read XRefKit governance Markdown from the client filesystem while MCP-only mode is active.",
         "Do not assume referenced Markdown files exist on the client filesystem.",
+        "Treat path-like metadata such as meta_path, skill_doc, path, or path#xid text as server-side identity or diagnostic metadata only; do not open it through the client filesystem for governance content.",
         "Do not automatically load all links from startup references; use links only when the current task actually needs them.",
         "When transferred Markdown content includes links entries, resolve a needed link by calling get_document_by_xid with the link xid.",
         "Use the returned document content as the authoritative text for that XID.",
@@ -783,18 +942,78 @@ def _knowledge_entry(
     )
 
 
+def _external_knowledge_entry(root: Path, path: Path, text: str) -> KnowledgeCatalogEntry:
+    xid = first_xid(text)
+    if not xid:
+        raise ValueError(f"external domain knowledge must declare an XID: {path}")
+    rel = _external_relative_path(root, path)
+    parts = Path(rel).parts
+    domain = parts[0] if len(parts) > 1 else "external_domain_knowledge"
+    logical_path = f"external-domain-knowledge/{stable_hash(str(root))[:12]}/{rel}"
+    return KnowledgeCatalogEntry(
+        xid=xid,
+        version=1,
+        content_hash=stable_hash(text),
+        revised_at=file_last_modified(path),
+        title=first_heading(text, path.stem),
+        domain=domain,
+        summary=first_paragraph(text),
+        applies_when=[],
+        requires_knowledge=markdown_xid_links(text),
+        related_skills=[],
+        related_capabilities=[],
+        path=logical_path,
+        missing=[],
+        zone_metadata={
+            "ownership_enabled": False,
+            "zone": "external_domain_knowledge",
+            "owner": None,
+            "pack_id": None,
+            "local_only": False,
+            "catalog": True,
+            "distribution": True,
+            "shadowing": False,
+        },
+    )
+
+
+def _resolve_domain_knowledge_root(path: str | Path) -> Path:
+    root = Path(path).expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(root)
+    if not root.is_dir():
+        raise NotADirectoryError(root)
+    return root
+
+
+def _external_knowledge_files(root: Path) -> list[Path]:
+    return sorted(path for path in root.glob("**/*.md") if path.is_file())
+
+
+def _external_relative_path(root: Path, path: Path) -> str:
+    return path.resolve().relative_to(root).as_posix()
+
+
 def _managed_markdown_files(root: Path, ownership: Ownership | None = None) -> list[Path]:
     files: list[Path] = []
     for dirname in ["agent", "docs", "knowledge", "skills"]:
         base = root / dirname
         if base.exists():
-            files.extend(path for path in sorted(base.glob("**/*.md")) if _catalog_enabled(root, ownership, path))
+            files.extend(
+                path
+                for path in sorted(base.glob("**/*"))
+                if path.is_file()
+                and path.suffix.lower() in XID_DOCUMENT_SUFFIXES
+                and _catalog_enabled(root, ownership, path)
+            )
     packs_root = root / "packs"
     if ownership is not None and packs_root.exists():
         files.extend(
             path
-            for path in sorted(packs_root.glob("*/**/*.md"))
-            if _catalog_enabled(root, ownership, path)
+            for path in sorted(packs_root.glob("*/**/*"))
+            if path.is_file()
+            and path.suffix.lower() in XID_DOCUMENT_SUFFIXES
+            and _catalog_enabled(root, ownership, path)
         )
     return files
 
@@ -822,6 +1041,19 @@ def _managed_markdown_matches_by_xid(
     return matches
 
 
+def _external_markdown_matches_by_xid(
+    roots: tuple[Path, ...],
+    xid: str,
+) -> list[tuple[Path, str]]:
+    matches: list[tuple[Path, str]] = []
+    for root in roots:
+        for path in _external_knowledge_files(root):
+            text = read_text(path)
+            if first_xid(text) == xid:
+                matches.append((path, text))
+    return matches
+
+
 def _duplicate_skill_ids(entries: list[SkillCatalogEntry]) -> dict[str, list[str]]:
     by_id: dict[str, list[str]] = {}
     for entry in entries:
@@ -843,6 +1075,75 @@ def _xref_document(path: Path, root: Path, text: str) -> XRefDocument:
         links=markdown_xid_link_targets(text),
         content_hash=stable_hash(content),
     )
+
+
+def _external_xref_document(path: Path, text: str) -> XRefDocument:
+    xid = first_xid(text)
+    if not xid:
+        raise ValueError(f"external domain knowledge must declare an XID: {path}")
+    content = markdown_xid_only_text(text)
+    return XRefDocument(
+        xid=xid,
+        title=first_heading(text, path.stem),
+        path=f"external-domain-knowledge/{xid}.md",
+        summary=first_paragraph(text),
+        content=content,
+        links=markdown_xid_link_targets(text),
+        content_hash=stable_hash(content),
+    )
+
+
+def _path_in_roots(path: Path, roots: tuple[Path, ...]) -> bool:
+    resolved = path.resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _xref_document_for_catalog(
+    repo_root: Path,
+    external_roots: tuple[Path, ...],
+    path: Path,
+    text: str,
+) -> XRefDocument:
+    if _path_in_roots(path, external_roots):
+        return _external_xref_document(path, text)
+    return _xref_document(path, repo_root, text)
+
+
+def _document_conflict_match(
+    repo_root: Path,
+    ownership: Ownership | None,
+    path: Path,
+    text: str,
+) -> dict[str, object]:
+    try:
+        rel = relative_to_repo(path, repo_root)
+    except ValueError:
+        return {
+            "source": "external_domain_knowledge",
+            "content_hash": _external_xref_document(path, text).content_hash,
+            "zone_metadata": {
+                "ownership_enabled": False,
+                "zone": "external_domain_knowledge",
+                "owner": None,
+                "pack_id": None,
+                "local_only": False,
+                "catalog": True,
+                "distribution": True,
+                "shadowing": False,
+            },
+        }
+    return {
+        "source": "repository",
+        "path": rel,
+        "content_hash": _xref_document(path, repo_root, text).content_hash,
+        "zone_metadata": _zone_metadata(ownership, rel),
+    }
 
 
 def _conditional_document_response(
@@ -2152,16 +2453,153 @@ def _tokens(value: str) -> set[str]:
     normalized = (
         value.lower()
         .replace("_", " ")
+        .replace("-", " ")
         .replace("c#", "csharp")
         .replace(".net", "dotnet")
         .replace("non-roslyn", "roslyn")
     )
     tokens = {match.group(0).lower() for match in TOKEN_RE.finditer(normalized)}
+    for alias, expanded in ROUTING_SYNONYMS.items():
+        if alias.lower() in normalized:
+            tokens.update(expanded)
     if "roslyn" in tokens:
         tokens.add("diagnostics")
     if "csharp" in tokens:
         tokens.add("c#")
+    if "script" in tokens:
+        tokens.add("automation")
+    if "tool" in tokens:
+        tokens.add("tooling")
+    if "traceability" in tokens:
+        tokens.add("trace")
     return tokens
+
+
+def _knowledge_slot_text(slot: dict) -> str:
+    return " ".join(str(value) for value in slot.values() if value is not None)
+
+
+def _routing_categories(tokens: set[str]) -> dict[str, set[str]]:
+    effective_tokens = tokens - STOP_TOKENS
+    categories: dict[str, set[str]] = {}
+    for category, terms in ROUTING_CATEGORY_TERMS.items():
+        matched = effective_tokens & terms
+        if matched:
+            categories[category] = matched
+    return categories
+
+
+def _skill_values_by_category(skill: SkillCatalogEntry) -> dict[str, list[str]]:
+    closure_values = [
+        *skill.closure_contract.closure_conditions,
+        skill.closure_contract.handoff_policy,
+        skill.closure_contract.worklist_policy,
+    ]
+    knowledge_slot_values = [_knowledge_slot_text(slot) for slot in skill.knowledge_slots]
+    tool_values = [
+        " ".join(str(value) for value in tool.values() if value is not None)
+        for tool in skill.required_tools
+    ]
+    return {
+        "activity": [
+            skill.skill_id,
+            skill.summary,
+            skill.capability,
+            skill.tuning,
+            skill.responsibility,
+            *skill.intent,
+            *skill.applies_when,
+        ],
+        "artifact": [
+            skill.skill_id,
+            skill.summary,
+            *skill.target_artifacts,
+            *skill.inputs,
+            *skill.outputs,
+        ],
+        "domain": [
+            skill.skill_id,
+            skill.summary,
+            skill.tuning,
+            skill.responsibility,
+            *skill.inputs,
+            *skill.outputs,
+            *knowledge_slot_values,
+        ],
+        "phase": [
+            skill.summary,
+            *skill.applies_when,
+            *skill.inputs,
+            *skill.outputs,
+            *closure_values,
+        ],
+        "evidence_trace": [
+            skill.summary,
+            *skill.inputs,
+            *skill.outputs,
+            *closure_values,
+            *knowledge_slot_values,
+        ],
+        "tool_runtime": [
+            skill.skill_id,
+            skill.summary,
+            *skill.inputs,
+            *skill.outputs,
+            *tool_values,
+            *knowledge_slot_values,
+        ],
+    }
+
+
+def _mcp_content_resolution_policy() -> dict[str, str]:
+    return {
+        "mode": "mcp_only",
+        "xid_document_tool": "get_document_by_xid",
+        "skill_body_tool": "get_skill",
+        "path_like_fields": "server_side_identity_or_diagnostic_only",
+        "client_filesystem_resolution": "forbidden",
+    }
+
+
+def _matched_routing_categories(
+    skill: SkillCatalogEntry, query_categories: dict[str, set[str]]
+) -> dict[str, list[str]]:
+    values_by_category = _skill_values_by_category(skill)
+    matched_categories: dict[str, list[str]] = {}
+    for category, query_terms in query_categories.items():
+        values = values_by_category.get(category, [])
+        matches: list[str] = []
+        for value in values:
+            value_tokens = _tokens(value) - STOP_TOKENS
+            matched_terms = sorted(query_terms & value_tokens)
+            if matched_terms:
+                matches.append(f"{value} [{', '.join(matched_terms)}]")
+        if matches:
+            matched_categories[category] = matches[:5]
+    return matched_categories
+
+
+def _has_required_category_coverage(
+    query_categories: dict[str, set[str]], matched_categories: dict[str, list[str]]
+) -> bool:
+    for category in ["domain", "tool_runtime", "evidence_trace"]:
+        if category in query_categories and category not in matched_categories:
+            return False
+    return True
+
+
+def _category_coverage_multiplier(
+    query_categories: dict[str, set[str]], matched_categories: dict[str, list[str]]
+) -> float:
+    multiplier = 1.0
+    for category, penalty in [
+        ("domain", 0.55),
+        ("tool_runtime", 0.45),
+        ("evidence_trace", 0.7),
+    ]:
+        if category in query_categories and category not in matched_categories:
+            multiplier *= penalty
+    return multiplier
 
 
 def _matched_values(
